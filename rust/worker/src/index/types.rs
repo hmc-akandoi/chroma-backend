@@ -1,6 +1,8 @@
+use crate::distance::DistanceFunction;
 use crate::errors::{ChromaError, ErrorCodes};
 use crate::types::{MetadataValue, Segment};
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub(crate) struct IndexConfig {
@@ -55,6 +57,7 @@ pub(crate) trait Index<C> {
     fn init(
         index_config: &IndexConfig,
         custom_config: Option<&C>,
+        id: Uuid,
     ) -> Result<Self, Box<dyn ChromaError>>
     where
         Self: Sized;
@@ -74,62 +77,7 @@ pub(crate) trait Index<C> {
 /// TODO: Right now load() takes IndexConfig because we don't implement save/load of the config.
 pub(crate) trait PersistentIndex<C>: Index<C> {
     fn save(&self) -> Result<(), Box<dyn ChromaError>>;
-    fn load(path: &str, index_config: &IndexConfig) -> Result<Self, Box<dyn ChromaError>>
+    fn load(path: &str, index_config: &IndexConfig, id: Uuid) -> Result<Self, Box<dyn ChromaError>>
     where
         Self: Sized;
-}
-
-/// The distance function enum.
-/// # Description
-/// This enum defines the distance functions supported by indices in Chroma.
-/// # Variants
-/// - `Euclidean` - The Euclidean or l2 norm.
-/// - `Cosine` - The cosine distance. Specifically, 1 - cosine.
-/// - `InnerProduct` - The inner product. Specifically, 1 - inner product.
-/// # Notes
-/// See https://docs.trychroma.com/usage-guide#changing-the-distance-function
-#[derive(Clone, Debug)]
-pub(crate) enum DistanceFunction {
-    Euclidean,
-    Cosine,
-    InnerProduct,
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum DistanceFunctionError {
-    #[error("Invalid distance function `{0}`")]
-    InvalidDistanceFunction(String),
-}
-
-impl ChromaError for DistanceFunctionError {
-    fn code(&self) -> ErrorCodes {
-        match self {
-            DistanceFunctionError::InvalidDistanceFunction(_) => ErrorCodes::InvalidArgument,
-        }
-    }
-}
-
-impl TryFrom<&str> for DistanceFunction {
-    type Error = DistanceFunctionError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "l2" => Ok(DistanceFunction::Euclidean),
-            "cosine" => Ok(DistanceFunction::Cosine),
-            "ip" => Ok(DistanceFunction::InnerProduct),
-            _ => Err(DistanceFunctionError::InvalidDistanceFunction(
-                value.to_string(),
-            )),
-        }
-    }
-}
-
-impl Into<String> for DistanceFunction {
-    fn into(self) -> String {
-        match self {
-            DistanceFunction::Euclidean => "l2".to_string(),
-            DistanceFunction::Cosine => "cosine".to_string(),
-            DistanceFunction::InnerProduct => "ip".to_string(),
-        }
-    }
 }
