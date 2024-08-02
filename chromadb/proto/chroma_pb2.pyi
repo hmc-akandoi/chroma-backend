@@ -122,9 +122,10 @@ class Segment(_message.Message):
     def __init__(self, id: _Optional[str] = ..., type: _Optional[str] = ..., scope: _Optional[_Union[SegmentScope, str]] = ..., collection: _Optional[str] = ..., metadata: _Optional[_Union[UpdateMetadata, _Mapping]] = ..., file_paths: _Optional[_Mapping[str, FilePaths]] = ...) -> None: ...
 
 class Collection(_message.Message):
-    __slots__ = ("id", "name", "metadata", "dimension", "tenant", "database", "log_position", "version")
+    __slots__ = ("id", "name", "configuration_json_str", "metadata", "dimension", "tenant", "database", "log_position", "version")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
+    CONFIGURATION_JSON_STR_FIELD_NUMBER: _ClassVar[int]
     METADATA_FIELD_NUMBER: _ClassVar[int]
     DIMENSION_FIELD_NUMBER: _ClassVar[int]
     TENANT_FIELD_NUMBER: _ClassVar[int]
@@ -133,13 +134,14 @@ class Collection(_message.Message):
     VERSION_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
+    configuration_json_str: str
     metadata: UpdateMetadata
     dimension: int
     tenant: str
     database: str
     log_position: int
     version: int
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., metadata: _Optional[_Union[UpdateMetadata, _Mapping]] = ..., dimension: _Optional[int] = ..., tenant: _Optional[str] = ..., database: _Optional[str] = ..., log_position: _Optional[int] = ..., version: _Optional[int] = ...) -> None: ...
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., configuration_json_str: _Optional[str] = ..., metadata: _Optional[_Union[UpdateMetadata, _Mapping]] = ..., dimension: _Optional[int] = ..., tenant: _Optional[str] = ..., database: _Optional[str] = ..., log_position: _Optional[int] = ..., version: _Optional[int] = ...) -> None: ...
 
 class Database(_message.Message):
     __slots__ = ("id", "name", "tenant")
@@ -158,14 +160,16 @@ class Tenant(_message.Message):
     def __init__(self, name: _Optional[str] = ...) -> None: ...
 
 class UpdateMetadataValue(_message.Message):
-    __slots__ = ("string_value", "int_value", "float_value")
+    __slots__ = ("string_value", "int_value", "float_value", "bool_value")
     STRING_VALUE_FIELD_NUMBER: _ClassVar[int]
     INT_VALUE_FIELD_NUMBER: _ClassVar[int]
     FLOAT_VALUE_FIELD_NUMBER: _ClassVar[int]
+    BOOL_VALUE_FIELD_NUMBER: _ClassVar[int]
     string_value: str
     int_value: int
     float_value: float
-    def __init__(self, string_value: _Optional[str] = ..., int_value: _Optional[int] = ..., float_value: _Optional[float] = ...) -> None: ...
+    bool_value: bool
+    def __init__(self, string_value: _Optional[str] = ..., int_value: _Optional[int] = ..., float_value: _Optional[float] = ..., bool_value: bool = ...) -> None: ...
 
 class UpdateMetadata(_message.Message):
     __slots__ = ("metadata",)
@@ -267,7 +271,7 @@ class Where(_message.Message):
     def __init__(self, direct_comparison: _Optional[_Union[DirectComparison, _Mapping]] = ..., children: _Optional[_Union[WhereChildren, _Mapping]] = ...) -> None: ...
 
 class DirectComparison(_message.Message):
-    __slots__ = ("key", "single_string_operand", "string_list_operand", "single_int_operand", "int_list_operand", "single_double_operand", "double_list_operand")
+    __slots__ = ("key", "single_string_operand", "string_list_operand", "single_int_operand", "int_list_operand", "single_double_operand", "double_list_operand", "bool_list_operand", "single_bool_operand")
     KEY_FIELD_NUMBER: _ClassVar[int]
     SINGLE_STRING_OPERAND_FIELD_NUMBER: _ClassVar[int]
     STRING_LIST_OPERAND_FIELD_NUMBER: _ClassVar[int]
@@ -275,6 +279,8 @@ class DirectComparison(_message.Message):
     INT_LIST_OPERAND_FIELD_NUMBER: _ClassVar[int]
     SINGLE_DOUBLE_OPERAND_FIELD_NUMBER: _ClassVar[int]
     DOUBLE_LIST_OPERAND_FIELD_NUMBER: _ClassVar[int]
+    BOOL_LIST_OPERAND_FIELD_NUMBER: _ClassVar[int]
+    SINGLE_BOOL_OPERAND_FIELD_NUMBER: _ClassVar[int]
     key: str
     single_string_operand: SingleStringComparison
     string_list_operand: StringListComparison
@@ -282,7 +288,9 @@ class DirectComparison(_message.Message):
     int_list_operand: IntListComparison
     single_double_operand: SingleDoubleComparison
     double_list_operand: DoubleListComparison
-    def __init__(self, key: _Optional[str] = ..., single_string_operand: _Optional[_Union[SingleStringComparison, _Mapping]] = ..., string_list_operand: _Optional[_Union[StringListComparison, _Mapping]] = ..., single_int_operand: _Optional[_Union[SingleIntComparison, _Mapping]] = ..., int_list_operand: _Optional[_Union[IntListComparison, _Mapping]] = ..., single_double_operand: _Optional[_Union[SingleDoubleComparison, _Mapping]] = ..., double_list_operand: _Optional[_Union[DoubleListComparison, _Mapping]] = ...) -> None: ...
+    bool_list_operand: BoolListComparison
+    single_bool_operand: SingleBoolComparison
+    def __init__(self, key: _Optional[str] = ..., single_string_operand: _Optional[_Union[SingleStringComparison, _Mapping]] = ..., string_list_operand: _Optional[_Union[StringListComparison, _Mapping]] = ..., single_int_operand: _Optional[_Union[SingleIntComparison, _Mapping]] = ..., int_list_operand: _Optional[_Union[IntListComparison, _Mapping]] = ..., single_double_operand: _Optional[_Union[SingleDoubleComparison, _Mapping]] = ..., double_list_operand: _Optional[_Union[DoubleListComparison, _Mapping]] = ..., bool_list_operand: _Optional[_Union[BoolListComparison, _Mapping]] = ..., single_bool_operand: _Optional[_Union[SingleBoolComparison, _Mapping]] = ...) -> None: ...
 
 class WhereChildren(_message.Message):
     __slots__ = ("children", "operator")
@@ -307,6 +315,14 @@ class SingleStringComparison(_message.Message):
     value: str
     comparator: GenericComparator
     def __init__(self, value: _Optional[str] = ..., comparator: _Optional[_Union[GenericComparator, str]] = ...) -> None: ...
+
+class SingleBoolComparison(_message.Message):
+    __slots__ = ("value", "comparator")
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    COMPARATOR_FIELD_NUMBER: _ClassVar[int]
+    value: bool
+    comparator: GenericComparator
+    def __init__(self, value: bool = ..., comparator: _Optional[_Union[GenericComparator, str]] = ...) -> None: ...
 
 class IntListComparison(_message.Message):
     __slots__ = ("values", "list_operator")
@@ -333,6 +349,14 @@ class DoubleListComparison(_message.Message):
     values: _containers.RepeatedScalarFieldContainer[float]
     list_operator: ListOperator
     def __init__(self, values: _Optional[_Iterable[float]] = ..., list_operator: _Optional[_Union[ListOperator, str]] = ...) -> None: ...
+
+class BoolListComparison(_message.Message):
+    __slots__ = ("values", "list_operator")
+    VALUES_FIELD_NUMBER: _ClassVar[int]
+    LIST_OPERATOR_FIELD_NUMBER: _ClassVar[int]
+    values: _containers.RepeatedScalarFieldContainer[bool]
+    list_operator: ListOperator
+    def __init__(self, values: _Optional[_Iterable[bool]] = ..., list_operator: _Optional[_Union[ListOperator, str]] = ...) -> None: ...
 
 class SingleDoubleComparison(_message.Message):
     __slots__ = ("value", "generic_comparator", "number_comparator")

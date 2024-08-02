@@ -230,6 +230,26 @@ Delete a collection with the given name.
   client.delete_collection("my_collection")
   ```
 
+## count\_collections
+
+```python
+def count_collections() -> int
+```
+
+Count the number of collections.
+
+**Returns**:
+
+- `int` - The number of collections.
+
+
+**Examples**:
+
+```python
+client.count_collections()
+# 1
+```
+
 ## reset
 
 ```python
@@ -265,3 +285,15 @@ Get the settings used to initialize the client.
 **Returns**:
 
 - `Settings` - The settings used to initialize the client.
+
+## get_max_batch_size
+
+```python
+def get_max_batch_size() -> int
+```
+
+Get the maximum batch size.
+
+**Returns**:
+
+- `int` - The maximum number of records that can be created or mutated in a single call.

@@ -3,8 +3,11 @@ from typing import Sequence, Optional
 from uuid import UUID
 
 from overrides import override
+from chromadb.api.configuration import (
+    CollectionConfiguration,
+    CollectionConfigurationInternal,
+)
 from chromadb.config import DEFAULT_DATABASE, DEFAULT_TENANT
-from chromadb.api.models.Collection import Collection
 from chromadb.api.types import (
     CollectionMetadata,
     Documents,
@@ -14,6 +17,8 @@ from chromadb.api.types import (
     Embeddings,
     IDs,
     Include,
+    IncludeMetadataDocumentsEmbeddings,
+    IncludeMetadataDocumentsEmbeddingsDistances,
     Loadable,
     Metadatas,
     URIs,
@@ -23,8 +28,18 @@ from chromadb.api.types import (
     WhereDocument,
 )
 from chromadb.config import Component, Settings
-from chromadb.types import Database, Tenant
+from chromadb.types import Database, Tenant, Collection as CollectionModel
 import chromadb.utils.embedding_functions as ef
+from chromadb.api.models.Collection import Collection
+
+
+# Re-export the async version
+from chromadb.api.async_api import (  # noqa: F401
+    AsyncBaseAPI as AsyncBaseAPI,
+    AsyncClientAPI as AsyncClientAPI,
+    AsyncAdminAPI as AsyncAdminAPI,
+    AsyncServerAPI as AsyncServerAPI,
+)
 
 
 class BaseAPI(ABC):
@@ -42,29 +57,6 @@ class BaseAPI(ABC):
     #
     # COLLECTION METHODS
     #
-
-    @abstractmethod
-    def list_collections(
-        self,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-    ) -> Sequence[Collection]:
-        """List all collections.
-        Args:
-            limit: The maximum number of entries to return. Defaults to None.
-            offset: The number of entries to skip before returning. Defaults to None.
-
-        Returns:
-            Sequence[Collection]: A list of collections
-
-        Examples:
-            ```python
-            client.list_collections()
-            # [collection(name="my_collection", metadata={})]
-            ```
-        """
-        pass
-
     @abstractmethod
     def count_collections(self) -> int:
         """Count the number of collections.
@@ -76,107 +68,6 @@ class BaseAPI(ABC):
             ```python
             client.count_collections()
             # 1
-            ```
-        """
-        pass
-
-    @abstractmethod
-    def create_collection(
-        self,
-        name: str,
-        metadata: Optional[CollectionMetadata] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
-        get_or_create: bool = False,
-    ) -> Collection:
-        """Create a new collection with the given name and metadata.
-        Args:
-            name: The name of the collection to create.
-            metadata: Optional metadata to associate with the collection.
-            embedding_function: Optional function to use to embed documents.
-                                Uses the default embedding function if not provided.
-            get_or_create: If True, return the existing collection if it exists.
-            data_loader: Optional function to use to load records (documents, images, etc.)
-
-        Returns:
-            Collection: The newly created collection.
-
-        Raises:
-            ValueError: If the collection already exists and get_or_create is False.
-            ValueError: If the collection name is invalid.
-
-        Examples:
-            ```python
-            client.create_collection("my_collection")
-            # collection(name="my_collection", metadata={})
-
-            client.create_collection("my_collection", metadata={"foo": "bar"})
-            # collection(name="my_collection", metadata={"foo": "bar"})
-            ```
-        """
-        pass
-
-    @abstractmethod
-    def get_collection(
-        self,
-        name: str,
-        id: Optional[UUID] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
-    ) -> Collection:
-        """Get a collection with the given name.
-        Args:
-            id: The UUID of the collection to get. Id and Name are simultaneously used for lookup if provided.
-            name: The name of the collection to get
-            embedding_function: Optional function to use to embed documents.
-                                Uses the default embedding function if not provided.
-            data_loader: Optional function to use to load records (documents, images, etc.)
-
-        Returns:
-            Collection: The collection
-
-        Raises:
-            ValueError: If the collection does not exist
-
-        Examples:
-            ```python
-            client.get_collection("my_collection")
-            # collection(name="my_collection", metadata={})
-            ```
-        """
-        pass
-
-    @abstractmethod
-    def get_or_create_collection(
-        self,
-        name: str,
-        metadata: Optional[CollectionMetadata] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
-    ) -> Collection:
-        """Get or create a collection with the given name and metadata.
-        Args:
-            name: The name of the collection to get or create
-            metadata: Optional metadata to associate with the collection. If
-            the collection alredy exists, the metadata will be updated if
-            provided and not None. If the collection does not exist, the
-            new collection will be created with the provided metadata.
-            embedding_function: Optional function to use to embed documents
-            data_loader: Optional function to use to load records (documents, images, etc.)
-
-        Returns:
-            The collection
-
-        Examples:
-            ```python
-            client.get_or_create_collection("my_collection")
-            # collection(name="my_collection", metadata={})
             ```
         """
         pass
@@ -335,7 +226,7 @@ class BaseAPI(ABC):
         page: Optional[int] = None,
         page_size: Optional[int] = None,
         where_document: Optional[WhereDocument] = {},
-        include: Include = ["embeddings", "metadatas", "documents"],
+        include: Include = IncludeMetadataDocumentsEmbeddings,
     ) -> GetResult:
         """[Internal] Returns entries from a collection specified by UUID.
 
@@ -385,7 +276,7 @@ class BaseAPI(ABC):
         n_results: int = 10,
         where: Where = {},
         where_document: WhereDocument = {},
-        include: Include = ["embeddings", "metadatas", "documents", "distances"],
+        include: Include = IncludeMetadataDocumentsEmbeddingsDistances,
     ) -> QueryResult:
         """[Internal] Performs a nearest neighbors query on a collection specified by UUID.
 
@@ -432,17 +323,140 @@ class BaseAPI(ABC):
         """
         pass
 
-    @property
     @abstractmethod
-    def max_batch_size(self) -> int:
-        """Return the maximum number of records that can be submitted in a single call
-        to submit_embeddings."""
+    def get_max_batch_size(self) -> int:
+        """Return the maximum number of records that can be created or mutated in a single call."""
         pass
 
 
 class ClientAPI(BaseAPI, ABC):
     tenant: str
     database: str
+
+    @abstractmethod
+    def list_collections(
+        self,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Sequence[Collection]:
+        """List all collections.
+        Args:
+            limit: The maximum number of entries to return. Defaults to None.
+            offset: The number of entries to skip before returning. Defaults to None.
+
+        Returns:
+            Sequence[Collection]: A list of collections
+
+        Examples:
+            ```python
+            client.list_collections()
+            # [collection(name="my_collection", metadata={})]
+            ```
+        """
+        pass
+
+    @abstractmethod
+    def create_collection(
+        self,
+        name: str,
+        configuration: Optional[CollectionConfiguration] = None,
+        metadata: Optional[CollectionMetadata] = None,
+        embedding_function: Optional[
+            EmbeddingFunction[Embeddable]
+        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
+        data_loader: Optional[DataLoader[Loadable]] = None,
+        get_or_create: bool = False,
+    ) -> Collection:
+        """Create a new collection with the given name and metadata.
+        Args:
+            name: The name of the collection to create.
+            metadata: Optional metadata to associate with the collection.
+            embedding_function: Optional function to use to embed documents.
+                                Uses the default embedding function if not provided.
+            get_or_create: If True, return the existing collection if it exists.
+            data_loader: Optional function to use to load records (documents, images, etc.)
+
+        Returns:
+            Collection: The newly created collection.
+
+        Raises:
+            ValueError: If the collection already exists and get_or_create is False.
+            ValueError: If the collection name is invalid.
+
+        Examples:
+            ```python
+            client.create_collection("my_collection")
+            # collection(name="my_collection", metadata={})
+
+            client.create_collection("my_collection", metadata={"foo": "bar"})
+            # collection(name="my_collection", metadata={"foo": "bar"})
+            ```
+        """
+        pass
+
+    @abstractmethod
+    def get_collection(
+        self,
+        name: str,
+        id: Optional[UUID] = None,
+        embedding_function: Optional[
+            EmbeddingFunction[Embeddable]
+        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
+        data_loader: Optional[DataLoader[Loadable]] = None,
+    ) -> Collection:
+        """Get a collection with the given name.
+        Args:
+            id: The UUID of the collection to get. Id and Name are simultaneously used for lookup if provided.
+            name: The name of the collection to get
+            embedding_function: Optional function to use to embed documents.
+                                Uses the default embedding function if not provided.
+            data_loader: Optional function to use to load records (documents, images, etc.)
+
+        Returns:
+            Collection: The collection
+
+        Raises:
+            ValueError: If the collection does not exist
+
+        Examples:
+            ```python
+            client.get_collection("my_collection")
+            # collection(name="my_collection", metadata={})
+            ```
+        """
+        pass
+
+    @abstractmethod
+    def get_or_create_collection(
+        self,
+        name: str,
+        configuration: Optional[CollectionConfiguration] = None,
+        metadata: Optional[CollectionMetadata] = None,
+        embedding_function: Optional[
+            EmbeddingFunction[Embeddable]
+        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
+        data_loader: Optional[DataLoader[Loadable]] = None,
+    ) -> Collection:
+        """Get or create a collection with the given name and metadata.
+        Args:
+            name: The name of the collection to get or create
+            metadata: Optional metadata to associate with the collection. If
+            the collection alredy exists, the metadata will be updated if
+            provided and not None. If the collection does not exist, the
+            new collection will be created with the provided metadata.
+            embedding_function: Optional function to use to embed documents
+            data_loader: Optional function to use to load records (documents, images, etc.)
+
+        Returns:
+            The collection
+
+        Examples:
+            ```python
+            client.get_or_create_collection("my_collection")
+            # collection(name="my_collection", metadata={})
+            ```
+        """
+        pass
 
     @abstractmethod
     def set_tenant(self, tenant: str, database: str = DEFAULT_DATABASE) -> None:
@@ -523,66 +537,52 @@ class ServerAPI(BaseAPI, AdminAPI, Component):
 
     @abstractmethod
     @override
-    def list_collections(
-        self,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        tenant: str = DEFAULT_TENANT,
-        database: str = DEFAULT_DATABASE,
-    ) -> Sequence[Collection]:
-        pass
-
-    @abstractmethod
-    @override
     def count_collections(
         self, tenant: str = DEFAULT_TENANT, database: str = DEFAULT_DATABASE
     ) -> int:
         pass
 
     @abstractmethod
-    @override
-    def create_collection(
+    def list_collections(
         self,
-        name: str,
-        metadata: Optional[CollectionMetadata] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
-        get_or_create: bool = False,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+    ) -> Sequence[CollectionModel]:
         pass
 
     @abstractmethod
-    @override
+    def create_collection(
+        self,
+        name: str,
+        configuration: Optional[CollectionConfigurationInternal] = None,
+        metadata: Optional[CollectionMetadata] = None,
+        get_or_create: bool = False,
+        tenant: str = DEFAULT_TENANT,
+        database: str = DEFAULT_DATABASE,
+    ) -> CollectionModel:
+        pass
+
+    @abstractmethod
     def get_collection(
         self,
         name: str,
         id: Optional[UUID] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+    ) -> CollectionModel:
         pass
 
     @abstractmethod
-    @override
     def get_or_create_collection(
         self,
         name: str,
+        configuration: Optional[CollectionConfigurationInternal] = None,
         metadata: Optional[CollectionMetadata] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+    ) -> CollectionModel:
         pass
 
     @abstractmethod

@@ -5,8 +5,9 @@ use crate::blockstore::{
 };
 use arrow::{
     array::{
-        Array, ArrayRef, BinaryBuilder, FixedSizeListBuilder, Float32Builder, Int32Array,
-        Int32Builder, ListBuilder, RecordBatch, StringBuilder, StructArray, UInt32Builder,
+        Array, ArrayRef, BinaryBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder,
+        Int32Array, Int32Builder, ListBuilder, RecordBatch, StringBuilder, StructArray,
+        UInt32Builder,
     },
     datatypes::{Field, Fields},
     util::bit_util,
@@ -41,6 +42,7 @@ impl Debug for BlockStorage {
 }
 
 pub enum BlockKeyArrowBuilder {
+    Boolean((StringBuilder, BooleanBuilder)),
     String((StringBuilder, StringBuilder)),
     Float32((StringBuilder, Float32Builder)),
     UInt32((StringBuilder, UInt32Builder)),
@@ -70,7 +72,14 @@ impl BlockKeyArrowBuilder {
                 builder.1.append_value(value);
             }
             KeyWrapper::Bool(value) => {
-                todo!()
+                let builder = match self {
+                    BlockKeyArrowBuilder::Boolean(builder) => builder,
+                    _ => {
+                        unreachable!("Invariant violation. BlockKeyArrowBuilder should be Boolean.")
+                    }
+                };
+                builder.0.append_value(key.prefix);
+                builder.1.append_value(value);
             }
             KeyWrapper::Uint32(value) => {
                 let builder = match self {
@@ -102,6 +111,18 @@ impl BlockKeyArrowBuilder {
             BlockKeyArrowBuilder::Float32((ref mut prefix_builder, ref mut key_builder)) => {
                 let prefix_field = Field::new("prefix", arrow::datatypes::DataType::Utf8, false);
                 let key_field = Field::new("key", arrow::datatypes::DataType::Float32, false);
+                let prefix_arr = prefix_builder.finish();
+                let key_arr = key_builder.finish();
+                (
+                    prefix_field,
+                    (&prefix_arr as &dyn Array).slice(0, prefix_arr.len()),
+                    key_field,
+                    (&key_arr as &dyn Array).slice(0, key_arr.len()),
+                )
+            }
+            BlockKeyArrowBuilder::Boolean((ref mut prefix_builder, ref mut key_builder)) => {
+                let prefix_field = Field::new("prefix", arrow::datatypes::DataType::Utf8, false);
+                let key_field = Field::new("key", arrow::datatypes::DataType::Boolean, false);
                 let prefix_arr = prefix_builder.finish();
                 let key_arr = key_builder.finish();
                 (
@@ -169,7 +190,7 @@ impl StringValueStorage {
         }
     }
 
-    fn get_value_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_value_size(&self, start: usize, end: usize) -> usize {
         let storage = self.storage.read();
         match storage.as_ref() {
             None => unreachable!("Invariant violation. A StringValueBuilder should have storage."),
@@ -184,7 +205,7 @@ impl StringValueStorage {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         let storage = self.storage.read();
         match storage.as_ref() {
             None => unreachable!("Invariant violation. A StringValueBuilder should have storage."),
@@ -224,8 +245,13 @@ impl StringValueStorage {
 
     fn to_arrow(&self) -> (Field, ArrayRef) {
         let item_capacity = self.len();
-        let mut value_builder =
-            StringBuilder::with_capacity(item_capacity, self.get_value_size(0, self.len()));
+        let mut value_builder;
+        if item_capacity == 0 {
+            value_builder = StringBuilder::new();
+        } else {
+            value_builder =
+                StringBuilder::with_capacity(item_capacity, self.get_value_size(0, self.len()));
+        }
 
         let storage = self.storage.read();
         let storage = match storage.as_ref() {
@@ -246,7 +272,7 @@ impl StringValueStorage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct UInt32Storage {
     pub(super) storage: Arc<RwLock<BTreeMap<CompositeKey, u32>>>,
 }
@@ -278,14 +304,14 @@ impl UInt32Storage {
         calculate_key_size(key_stream)
     }
 
-    fn get_value_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_value_size(&self, start: usize, end: usize) -> usize {
         let storage = self.storage.read();
         let value_stream = storage
             .iter()
             .skip(start)
             .take(end - start)
             .map(|(_, value)| value);
-        value_stream.fold(0, |acc, value| acc + value.to_string().len())
+        value_stream.fold(0, |acc, value| acc + value.get_size())
     }
 
     fn split(&self, prefix: &str, key: KeyWrapper) -> UInt32Storage {
@@ -314,14 +340,19 @@ impl UInt32Storage {
         builder
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         let storage = self.storage.read();
         storage.len()
     }
 
     fn to_arrow(&self) -> (Field, ArrayRef) {
         let item_capacity = self.storage.read().len();
-        let mut value_builder = UInt32Builder::with_capacity(item_capacity);
+        let mut value_builder;
+        if item_capacity == 0 {
+            value_builder = UInt32Builder::new();
+        } else {
+            value_builder = UInt32Builder::with_capacity(item_capacity);
+        }
         for (_, value) in self.storage.read().iter() {
             value_builder.append_value(*value);
         }
@@ -334,7 +365,7 @@ impl UInt32Storage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Int32ArrayStorage {
     pub(super) storage: Arc<RwLock<BTreeMap<CompositeKey, Int32Array>>>,
 }
@@ -416,10 +447,15 @@ impl Int32ArrayStorage {
 
     fn to_arrow(&self) -> (Field, ArrayRef) {
         let item_capacity = self.storage.read().len();
-        let mut value_builder = ListBuilder::with_capacity(
-            Int32Builder::with_capacity(self.total_value_count()),
-            item_capacity,
-        );
+        let mut value_builder;
+        if item_capacity == 0 {
+            value_builder = ListBuilder::new(Int32Builder::new());
+        } else {
+            value_builder = ListBuilder::with_capacity(
+                Int32Builder::with_capacity(self.total_value_count()),
+                item_capacity,
+            );
+        }
 
         let storage = self.storage.read();
         for (_, value) in storage.iter() {
@@ -443,7 +479,7 @@ impl Int32ArrayStorage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct RoaringBitmapStorage {
     pub(super) storage: Arc<RwLock<BTreeMap<CompositeKey, Vec<u8>>>>,
 }
@@ -475,7 +511,7 @@ impl RoaringBitmapStorage {
         calculate_key_size(key_stream)
     }
 
-    fn get_value_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_value_size(&self, start: usize, end: usize) -> usize {
         let storage = self.storage.read();
         let value_stream = storage
             .iter()
@@ -501,7 +537,7 @@ impl RoaringBitmapStorage {
         storage.iter().fold(0, |acc, (_, value)| acc + value.len())
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         let storage = self.storage.read();
         storage.len()
     }
@@ -523,8 +559,12 @@ impl RoaringBitmapStorage {
 
     fn to_arrow(&self) -> (Field, ArrayRef) {
         let item_capacity = self.len();
-        let mut value_builder =
-            BinaryBuilder::with_capacity(item_capacity, self.total_value_count());
+        let mut value_builder;
+        if item_capacity == 0 {
+            value_builder = BinaryBuilder::new();
+        } else {
+            value_builder = BinaryBuilder::with_capacity(item_capacity, self.total_value_count());
+        }
 
         let storage = self.storage.read();
         for (_, value) in storage.iter() {
@@ -540,7 +580,7 @@ impl RoaringBitmapStorage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct DataRecordStorage {
     pub(super) id_storage: Arc<RwLock<BTreeMap<CompositeKey, String>>>,
     pub(super) embedding_storage: Arc<RwLock<BTreeMap<CompositeKey, Vec<f32>>>>,
@@ -578,7 +618,7 @@ impl DataRecordStorage {
         calculate_key_size(key_stream)
     }
 
-    fn get_id_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_id_size(&self, start: usize, end: usize) -> usize {
         let id_storage = self.id_storage.read();
         let id_stream = id_storage
             .iter()
@@ -588,7 +628,7 @@ impl DataRecordStorage {
         id_stream.fold(0, |acc, value| acc + value.len())
     }
 
-    fn get_embedding_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_embedding_size(&self, start: usize, end: usize) -> usize {
         let embedding_storage = self.embedding_storage.read();
         let embedding_stream = embedding_storage
             .iter()
@@ -598,7 +638,7 @@ impl DataRecordStorage {
         embedding_stream.fold(0, |acc, value| acc + value.len() * 4)
     }
 
-    fn get_metadata_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_metadata_size(&self, start: usize, end: usize) -> usize {
         let metadata_storage = self.metadata_storage.read();
         let metadata_stream = metadata_storage
             .iter()
@@ -608,7 +648,7 @@ impl DataRecordStorage {
         metadata_stream.fold(0, |acc, value| acc + value.as_ref().map_or(0, |v| v.len()))
     }
 
-    fn get_document_size(&self, start: usize, end: usize) -> usize {
+    pub(super) fn get_document_size(&self, start: usize, end: usize) -> usize {
         let document_storage = self.document_storage.read();
         let document_stream = document_storage
             .iter()
@@ -631,11 +671,7 @@ impl DataRecordStorage {
             bit_util::round_upto_multiple_of_64(self.get_embedding_size(start, end));
         let metadata_size = bit_util::round_upto_multiple_of_64(self.get_metadata_size(start, end));
         let document_size = bit_util::round_upto_multiple_of_64(self.get_document_size(start, end));
-        // TODO: I think this will break can_add logic
-        let validity_bytes = bit_util::round_upto_multiple_of_64(bit_util::ceil(end - start, 8));
-        // Validity bytes are used for metadata and document fields since they are optional
-        let total_size =
-            id_size + embedding_size + metadata_size + document_size + validity_bytes * 2;
+        let total_size = id_size + embedding_size + metadata_size + document_size;
 
         total_size
     }
@@ -667,7 +703,7 @@ impl DataRecordStorage {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         let id_storage = self.id_storage.read();
         id_storage.len()
     }
@@ -689,18 +725,32 @@ impl DataRecordStorage {
 
     fn to_arrow(&self) -> (Field, ArrayRef) {
         let item_capacity = self.len();
-        let embedding_len = self.embedding_storage.read().iter().next().unwrap().1.len() as i32;
-        let mut id_builder =
-            StringBuilder::with_capacity(item_capacity, self.get_id_size(0, self.len()));
-        let mut embedding_builder = FixedSizeListBuilder::with_capacity(
-            Float32Builder::with_capacity(self.get_total_embedding_count()),
-            embedding_len,
-            item_capacity,
-        );
-        let mut metadata_builder =
-            BinaryBuilder::with_capacity(item_capacity, self.get_metadata_size(0, self.len()));
-        let mut document_builder =
-            StringBuilder::with_capacity(item_capacity, self.get_document_size(0, self.len()));
+        let mut embedding_builder;
+        let mut id_builder;
+        let mut metadata_builder;
+        let mut document_builder;
+        let mut embedding_len;
+        if item_capacity == 0 {
+            // ok to initialize fixed size float list with fixed size as 0.
+            embedding_len = 0;
+            embedding_builder = FixedSizeListBuilder::new(Float32Builder::new(), 0);
+            id_builder = StringBuilder::new();
+            metadata_builder = BinaryBuilder::new();
+            document_builder = StringBuilder::new();
+        } else {
+            embedding_len = self.embedding_storage.read().iter().next().unwrap().1.len() as i32;
+            id_builder =
+                StringBuilder::with_capacity(item_capacity, self.get_id_size(0, self.len()));
+            embedding_builder = FixedSizeListBuilder::with_capacity(
+                Float32Builder::with_capacity(self.get_total_embedding_count()),
+                embedding_len,
+                item_capacity,
+            );
+            metadata_builder =
+                BinaryBuilder::with_capacity(item_capacity, self.get_metadata_size(0, self.len()));
+            document_builder =
+                StringBuilder::with_capacity(item_capacity, self.get_document_size(0, self.len()));
+        }
 
         let id_storage = self.id_storage.read();
         let embedding_storage = self.embedding_storage.read();
@@ -797,6 +847,7 @@ impl BlockStorage {
         }
     }
 
+    /// Returns the arrow-padded (rounded to 64 bytes) size of the value data for the given range.
     pub(super) fn get_value_size(&self, start: usize, end: usize) -> usize {
         match self {
             BlockStorage::String(builder) => builder.get_value_size(start, end),

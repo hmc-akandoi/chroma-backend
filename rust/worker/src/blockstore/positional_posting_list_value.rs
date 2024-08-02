@@ -1,12 +1,12 @@
 use arrow::{
-    array::{AsArray, Int32Array, Int32Builder, ListArray, ListBuilder},
+    array::{Array, AsArray, Int32Array, Int32Builder, ListArray, ListBuilder},
     datatypes::Int32Type,
 };
 use thiserror::Error;
 
-use std::collections::{HashMap, HashSet};
-
 use crate::errors::{ChromaError, ErrorCodes};
+
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PositionalPostingList {
@@ -20,7 +20,7 @@ impl PositionalPostingList {
     }
 
     pub(crate) fn get_positions_for_doc_id(&self, doc_id: i32) -> Option<Int32Array> {
-        let index = self.doc_ids.iter().position(|x| x == Some(doc_id));
+        let index = self.doc_ids.values().binary_search(&doc_id).ok();
         match index {
             Some(index) => {
                 let target_positions = self.positions.value(index);
@@ -30,6 +30,13 @@ impl PositionalPostingList {
             }
             None => None,
         }
+    }
+
+    pub(crate) fn size_in_bytes(&self) -> usize {
+        let mut size = 0;
+        size += self.doc_ids.len() * std::mem::size_of::<i32>();
+        size += self.positions.len() * std::mem::size_of::<i32>();
+        size
     }
 }
 
@@ -53,6 +60,7 @@ impl ChromaError for PositionalPostingListBuilderError {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct PositionalPostingListBuilder {
     doc_ids: HashSet<i32>,
     positions: HashMap<i32, Vec<i32>>,
@@ -80,6 +88,15 @@ impl PositionalPostingListBuilder {
         Ok(())
     }
 
+    pub(crate) fn delete_doc_id(
+        &mut self,
+        doc_id: i32,
+    ) -> Result<(), PositionalPostingListBuilderError> {
+        self.doc_ids.remove(&doc_id);
+        self.positions.remove(&doc_id);
+        Ok(())
+    }
+
     pub(crate) fn contains_doc_id(&self, doc_id: i32) -> bool {
         self.doc_ids.contains(&doc_id)
     }
@@ -93,6 +110,8 @@ impl PositionalPostingListBuilder {
             return Err(PositionalPostingListBuilderError::DocIdDoesNotExist);
         }
 
+        // Safe to unwrap here since this is called for >= 2nd time a token
+        // exists in the document.
         self.positions.get_mut(&doc_id).unwrap().extend(positions);
         Ok(())
     }
@@ -204,6 +223,22 @@ mod tests {
         assert_eq!(
             list.get_positions_for_doc_id(1).unwrap(),
             Int32Array::from(vec![1, 2, 3, 4, 5, 6])
+        );
+    }
+
+    #[test]
+    fn test_positional_posting_list_delete_doc_id() {
+        let mut builder = PositionalPostingListBuilder::new();
+
+        let _res = builder.add_doc_id_and_positions(1, vec![1, 2, 3]);
+        let _res = builder.add_doc_id_and_positions(2, vec![4, 5, 6]);
+        let _res = builder.delete_doc_id(1);
+
+        let list = builder.build();
+        assert_eq!(list.get_doc_ids().values()[0], 2);
+        assert_eq!(
+            list.get_positions_for_doc_id(2).unwrap(),
+            Int32Array::from(vec![4, 5, 6])
         );
     }
 

@@ -1,28 +1,41 @@
+import os
 from typing import cast, ClassVar
 from chromadb.telemetry.product import ProductTelemetryEvent
-from chromadb.utils.embedding_functions import get_builtins
 
 
 class ClientStartEvent(ProductTelemetryEvent):
     def __init__(self) -> None:
         super().__init__()
+        # Lazy import to avoid circular imports
+        from chromadb import is_in_colab
+
+        self.in_colab = is_in_colab()
 
 
+class ServerStartEvent(ProductTelemetryEvent):
+    is_cli: bool
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.is_cli = os.environ.get("CHROMA_CLI", "False") == "True"
+
+
+# TODO: Re-enable embedding function tracking in create_collection
 class ClientCreateCollectionEvent(ProductTelemetryEvent):
     collection_uuid: str
-    embedding_function: str
+    # embedding_function: str
 
-    def __init__(self, collection_uuid: str, embedding_function: str):
+    def __init__(self, collection_uuid: str):  # , embedding_function: str):
         super().__init__()
         self.collection_uuid = collection_uuid
 
-        embedding_function_names = get_builtins()
+        # embedding_function_names = get_builtins()
 
-        self.embedding_function = (
-            embedding_function
-            if embedding_function in embedding_function_names
-            else "custom"
-        )
+        # self.embedding_function = (
+        #     embedding_function
+        #     if embedding_function in embedding_function_names
+        #     else "custom"
+        # )
 
 
 class CollectionAddEvent(ProductTelemetryEvent):

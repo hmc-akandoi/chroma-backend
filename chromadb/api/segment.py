@@ -1,6 +1,5 @@
-from functools import cached_property
-
 from chromadb.api import ServerAPI
+from chromadb.api.configuration import CollectionConfigurationInternal
 from chromadb.config import DEFAULT_DATABASE, DEFAULT_TENANT, Settings, System
 from chromadb.db.system import SysDB
 from chromadb.quota import QuotaEnforcer, Resource
@@ -14,22 +13,17 @@ from chromadb.telemetry.opentelemetry import (
 )
 from chromadb.telemetry.product import ProductTelemetryClient
 from chromadb.ingest import Producer
-from chromadb.api.models.Collection import Collection
+from chromadb.types import Collection as CollectionModel
 from chromadb import __version__
 from chromadb.errors import InvalidDimensionException, InvalidCollectionException
-import chromadb.utils.embedding_functions as ef
 
 from chromadb.api.types import (
     URI,
     CollectionMetadata,
-    Embeddable,
     Document,
-    EmbeddingFunction,
-    DataLoader,
     IDs,
     Embeddings,
     Embedding,
-    Loadable,
     Metadatas,
     Documents,
     URIs,
@@ -54,7 +48,7 @@ from chromadb.telemetry.product.events import (
 )
 
 import chromadb.types as t
-from typing import Any, Optional, Sequence, Generator, List, cast, Set, Dict
+from typing import Optional, Sequence, Generator, List, cast, Set, Dict
 from overrides import override
 from uuid import UUID, uuid4
 import time
@@ -153,15 +147,12 @@ class SegmentAPI(ServerAPI):
     def create_collection(
         self,
         name: str,
+        configuration: Optional[CollectionConfigurationInternal] = None,
         metadata: Optional[CollectionMetadata] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Any]
-        ] = ef.DefaultEmbeddingFunction(),
-        data_loader: Optional[DataLoader[Loadable]] = None,
         get_or_create: bool = False,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+    ) -> CollectionModel:
         if metadata is not None:
             validate_metadata(metadata)
 
@@ -170,11 +161,24 @@ class SegmentAPI(ServerAPI):
 
         id = uuid4()
 
-        coll, created = self._sysdb.create_collection(
+        model = CollectionModel(
             id=id,
             name=name,
             metadata=metadata,
+            configuration=configuration
+            if configuration is not None
+            else CollectionConfigurationInternal(),  # Use default configuration if none is provided
+            tenant=tenant,
+            database=database,
             dimension=None,
+        )
+        # TODO: Let sysdb create the collection directly from the model
+        coll, created = self._sysdb.create_collection(
+            id=model.id,
+            name=model.name,
+            configuration=model.get_configuration(),
+            metadata=model.metadata,
+            dimension=None,  # This is lazily populated on the first add
             get_or_create=get_or_create,
             tenant=tenant,
             database=database,
@@ -186,27 +190,21 @@ class SegmentAPI(ServerAPI):
             for segment in segments:
                 self._sysdb.create_segment(segment)
         else:
-            logger.info(f"Collection {name} is not created.")
+            logger.debug(
+                f"Collection {name} already exists, returning existing collection."
+            )
 
         # TODO: This event doesn't capture the get_or_create case appropriately
+        # TODO: Re-enable embedding function tracking in create_collection
         self._product_telemetry_client.capture(
             ClientCreateCollectionEvent(
                 collection_uuid=str(id),
-                embedding_function=embedding_function.__class__.__name__,
+                # embedding_function=embedding_function.__class__.__name__,
             )
         )
         add_attributes_to_current_span({"collection_uuid": str(id)})
 
-        return Collection(
-            client=self,
-            id=coll["id"],
-            name=name,
-            metadata=coll["metadata"],  # type: ignore
-            embedding_function=embedding_function,
-            data_loader=data_loader,
-            tenant=tenant,
-            database=database,
-        )
+        return coll
 
     @trace_method(
         "SegmentAPI.get_or_create_collection", OpenTelemetryGranularity.OPERATION
@@ -215,19 +213,15 @@ class SegmentAPI(ServerAPI):
     def get_or_create_collection(
         self,
         name: str,
+        configuration: Optional[CollectionConfigurationInternal] = None,
         metadata: Optional[CollectionMetadata] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
-        return self.create_collection(  # type: ignore
+    ) -> CollectionModel:
+        return self.create_collection(
             name=name,
             metadata=metadata,
-            embedding_function=embedding_function,
-            data_loader=data_loader,
+            configuration=configuration,
             get_or_create=True,
             tenant=tenant,
             database=database,
@@ -242,13 +236,9 @@ class SegmentAPI(ServerAPI):
         self,
         name: Optional[str] = None,
         id: Optional[UUID] = None,
-        embedding_function: Optional[
-            EmbeddingFunction[Embeddable]
-        ] = ef.DefaultEmbeddingFunction(),  # type: ignore
-        data_loader: Optional[DataLoader[Loadable]] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+    ) -> CollectionModel:
         if id is None and name is None or (id is not None and name is not None):
             raise ValueError("Name or id must be specified, but not both")
         existing = self._sysdb.get_collections(
@@ -256,18 +246,9 @@ class SegmentAPI(ServerAPI):
         )
 
         if existing:
-            return Collection(
-                client=self,
-                id=existing[0]["id"],
-                name=existing[0]["name"],
-                metadata=existing[0]["metadata"],  # type: ignore
-                embedding_function=embedding_function,
-                data_loader=data_loader,
-                tenant=existing[0]["tenant"],
-                database=existing[0]["database"],
-            )
+            return existing[0]
         else:
-            raise ValueError(f"Collection {name} does not exist.")
+            raise InvalidCollectionException(f"Collection {name} does not exist.")
 
     @trace_method("SegmentAPI.list_collection", OpenTelemetryGranularity.OPERATION)
     @override
@@ -277,23 +258,10 @@ class SegmentAPI(ServerAPI):
         offset: Optional[int] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Sequence[Collection]:
-        collections = []
-        db_collections = self._sysdb.get_collections(
+    ) -> Sequence[CollectionModel]:
+        return self._sysdb.get_collections(
             limit=limit, offset=offset, tenant=tenant, database=database
         )
-        for db_collection in db_collections:
-            collections.append(
-                Collection(
-                    client=self,
-                    id=db_collection["id"],
-                    name=db_collection["name"],
-                    metadata=db_collection["metadata"],  # type: ignore
-                    tenant=db_collection["tenant"],
-                    database=db_collection["database"],
-                )
-            )
-        return collections
 
     @trace_method("SegmentAPI.count_collections", OpenTelemetryGranularity.OPERATION)
     @override
@@ -348,12 +316,12 @@ class SegmentAPI(ServerAPI):
 
         if existing:
             self._sysdb.delete_collection(
-                existing[0]["id"], tenant=tenant, database=database
+                existing[0].id, tenant=tenant, database=database
             )
-            for s in self._manager.delete_segments(existing[0]["id"]):
+            for s in self._manager.delete_segments(existing[0].id):
                 self._sysdb.delete_segment(s)
-            if existing and existing[0]["id"] in self._collection_cache:
-                del self._collection_cache[existing[0]["id"]]
+            if existing and existing[0].id in self._collection_cache:
+                del self._collection_cache[existing[0].id]
         else:
             raise ValueError(f"Collection {name} does not exist.")
 
@@ -374,7 +342,7 @@ class SegmentAPI(ServerAPI):
         self._manager.hint_use_collection(collection_id, t.Operation.ADD)
         validate_batch(
             (ids, embeddings, metadatas, documents, uris),
-            {"max_batch_size": self.max_batch_size},
+            {"max_batch_size": self.get_max_batch_size()},
         )
         records_to_submit = []
         for r in _records(
@@ -416,7 +384,7 @@ class SegmentAPI(ServerAPI):
         self._manager.hint_use_collection(collection_id, t.Operation.UPDATE)
         validate_batch(
             (ids, embeddings, metadatas, documents, uris),
-            {"max_batch_size": self.max_batch_size},
+            {"max_batch_size": self.get_max_batch_size()},
         )
         records_to_submit = []
         for r in _records(
@@ -460,7 +428,7 @@ class SegmentAPI(ServerAPI):
         self._manager.hint_use_collection(collection_id, t.Operation.UPSERT)
         validate_batch(
             (ids, embeddings, metadatas, documents, uris),
-            {"max_batch_size": self.max_batch_size},
+            {"max_batch_size": self.get_max_batch_size()},
         )
         records_to_submit = []
         for r in _records(
@@ -491,7 +459,7 @@ class SegmentAPI(ServerAPI):
         page: Optional[int] = None,
         page_size: Optional[int] = None,
         where_document: Optional[WhereDocument] = {},
-        include: Include = ["embeddings", "metadatas", "documents"],
+        include: Include = ["embeddings", "metadatas", "documents"],  # type: ignore[list-item]
     ) -> GetResult:
         add_attributes_to_current_span(
             {
@@ -670,7 +638,7 @@ class SegmentAPI(ServerAPI):
         n_results: int = 10,
         where: Where = {},
         where_document: WhereDocument = {},
-        include: Include = ["documents", "metadatas", "distances"],
+        include: Include = ["documents", "metadatas", "distances"],  # type: ignore[list-item]
     ) -> QueryResult:
         add_attributes_to_current_span(
             {
@@ -679,6 +647,22 @@ class SegmentAPI(ServerAPI):
                 "where": str(where),
             }
         )
+
+        query_amount = len(query_embeddings)
+        self._product_telemetry_client.capture(
+            CollectionQueryEvent(
+                collection_uuid=str(collection_id),
+                query_amount=query_amount,
+                n_results=n_results,
+                with_metadata_filter=query_amount if where is not None else 0,
+                with_document_filter=query_amount if where_document is not None else 0,
+                include_metadatas=query_amount if "metadatas" in include else 0,
+                include_documents=query_amount if "documents" in include else 0,
+                include_uris=query_amount if "uris" in include else 0,
+                include_distances=query_amount if "distances" in include else 0,
+            )
+        )
+
         where = validate_where(where) if where is not None and len(where) > 0 else where
         where_document = (
             validate_where_document(where_document)
@@ -699,17 +683,6 @@ class SegmentAPI(ServerAPI):
             )
             allowed_ids = [r["id"] for r in records]
 
-        query = t.VectorQuery(
-            vectors=query_embeddings,
-            k=n_results,
-            allowed_ids=allowed_ids,
-            include_embeddings="embeddings" in include,
-            options=None,
-        )
-
-        vector_reader = self._manager.get_segment(collection_id, VectorReader)
-        results = vector_reader.query_vectors(query)
-
         ids: List[List[str]] = []
         distances: List[List[float]] = []
         embeddings: List[List[Embedding]] = []
@@ -717,54 +690,68 @@ class SegmentAPI(ServerAPI):
         uris: List[List[URI]] = []
         metadatas: List[List[t.Metadata]] = []
 
-        for result in results:
-            ids.append([r["id"] for r in result])
-            if "distances" in include:
-                distances.append([r["distance"] for r in result])
-            if "embeddings" in include:
-                embeddings.append([cast(Embedding, r["embedding"]) for r in result])
-
-        if "documents" in include or "metadatas" in include or "uris" in include:
-            all_ids: Set[str] = set()
-            for id_list in ids:
-                all_ids.update(id_list)
-            metadata_reader = self._manager.get_segment(collection_id, MetadataReader)
-            records = metadata_reader.get_metadata(ids=list(all_ids))
-            metadata_by_id = {r["id"]: r["metadata"] for r in records}
-            for id_list in ids:
-                # In the segment based architecture, it is possible for one segment
-                # to have a record that another segment does not have. This results in
-                # data inconsistency. For the case of the local segments and the
-                # local segment manager, there is a case where a thread writes
-                # a record to the vector segment but not the metadata segment.
-                # Then a query'ing thread reads from the vector segment and
-                # queries the metadata segment. The metadata segment does not have
-                # the record. In this case we choose to return potentially
-                # incorrect data in the form of None.
-                metadata_list = [metadata_by_id.get(id, None) for id in id_list]
-                if "metadatas" in include:
-                    metadatas.append(_clean_metadatas(metadata_list))  # type: ignore
+        # If where conditions returned empty list then no need to proceed
+        # further and can simply return an empty result set here.
+        if allowed_ids is not None and allowed_ids == []:
+            for em in range(len(query_embeddings)):
+                ids.append([])
+                if "distances" in include:
+                    distances.append([])
+                if "embeddings" in include:
+                    embeddings.append([])
                 if "documents" in include:
-                    doc_list = [_doc(m) for m in metadata_list]
-                    documents.append(doc_list)  # type: ignore
+                    documents.append([])
+                if "metadatas" in include:
+                    metadatas.append([])
                 if "uris" in include:
-                    uri_list = [_uri(m) for m in metadata_list]
-                    uris.append(uri_list)  # type: ignore
-
-        query_amount = len(query_embeddings)
-        self._product_telemetry_client.capture(
-            CollectionQueryEvent(
-                collection_uuid=str(collection_id),
-                query_amount=query_amount,
-                n_results=n_results,
-                with_metadata_filter=query_amount if where is not None else 0,
-                with_document_filter=query_amount if where_document is not None else 0,
-                include_metadatas=query_amount if "metadatas" in include else 0,
-                include_documents=query_amount if "documents" in include else 0,
-                include_uris=query_amount if "uris" in include else 0,
-                include_distances=query_amount if "distances" in include else 0,
+                    uris.append([])
+        else:
+            query = t.VectorQuery(
+                vectors=query_embeddings,
+                k=n_results,
+                allowed_ids=allowed_ids,
+                include_embeddings="embeddings" in include,
+                options=None,
             )
-        )
+
+            vector_reader = self._manager.get_segment(collection_id, VectorReader)
+            results = vector_reader.query_vectors(query)
+
+            for result in results:
+                ids.append([r["id"] for r in result])
+                if "distances" in include:
+                    distances.append([r["distance"] for r in result])
+                if "embeddings" in include:
+                    embeddings.append([cast(Embedding, r["embedding"]) for r in result])
+
+            if "documents" in include or "metadatas" in include or "uris" in include:
+                all_ids: Set[str] = set()
+                for id_list in ids:
+                    all_ids.update(id_list)
+                metadata_reader = self._manager.get_segment(
+                    collection_id, MetadataReader
+                )
+                records = metadata_reader.get_metadata(ids=list(all_ids))
+                metadata_by_id = {r["id"]: r["metadata"] for r in records}
+                for id_list in ids:
+                    # In the segment based architecture, it is possible for one segment
+                    # to have a record that another segment does not have. This results in
+                    # data inconsistency. For the case of the local segments and the
+                    # local segment manager, there is a case where a thread writes
+                    # a record to the vector segment but not the metadata segment.
+                    # Then a query'ing thread reads from the vector segment and
+                    # queries the metadata segment. The metadata segment does not have
+                    # the record. In this case we choose to return potentially
+                    # incorrect data in the form of None.
+                    metadata_list = [metadata_by_id.get(id, None) for id in id_list]
+                    if "metadatas" in include:
+                        metadatas.append(_clean_metadatas(metadata_list))  # type: ignore
+                    if "documents" in include:
+                        doc_list = [_doc(m) for m in metadata_list]
+                        documents.append(doc_list)  # type: ignore
+                    if "uris" in include:
+                        uri_list = [_uri(m) for m in metadata_list]
+                        uris.append(uri_list)  # type: ignore
 
         return QueryResult(
             ids=ids,
@@ -800,9 +787,8 @@ class SegmentAPI(ServerAPI):
     def get_settings(self) -> Settings:
         return self._settings
 
-    @cached_property
     @override
-    def max_batch_size(self) -> int:
+    def get_max_batch_size(self) -> int:
         return self._producer.max_batch_size
 
     # TODO: This could potentially cause race conditions in a distributed version of the
@@ -827,7 +813,7 @@ class SegmentAPI(ServerAPI):
         dimension."""
         if collection["dimension"] is None:
             if update:
-                id = collection["id"]
+                id = collection.id
                 self._sysdb.update_collection(id=id, dimension=dim)
                 self._collection_cache[id]["dimension"] = dim
         elif collection["dimension"] != dim:

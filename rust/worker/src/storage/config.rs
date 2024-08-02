@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::path::Path;
 
 #[derive(Deserialize, Debug)]
 /// The configuration for the chosen storage.
@@ -29,6 +28,9 @@ pub(crate) enum S3CredentialsConfig {
 pub(crate) struct S3StorageConfig {
     pub(crate) bucket: String,
     pub(crate) credentials: S3CredentialsConfig,
+    pub(crate) connect_timeout_ms: u64,
+    pub(crate) request_timeout_ms: u64,
+    pub(crate) upload_part_size_bytes: usize,
 }
 
 #[derive(Deserialize, Debug)]

@@ -1,6 +1,7 @@
 import array
 from uuid import UUID
 from typing import Dict, Optional, Tuple, Union, cast
+from chromadb.api.configuration import CollectionConfigurationInternal
 from chromadb.api.types import Embedding
 import chromadb.proto.chroma_pb2 as proto
 from chromadb.types import (
@@ -87,9 +88,11 @@ def _from_proto_metadata_handle_none(
 ) -> Optional[Union[UpdateMetadata, Metadata]]:
     if not metadata.metadata:
         return None
-    out_metadata: Dict[str, Union[str, int, float, None]] = {}
+    out_metadata: Dict[str, Union[str, int, float, bool, None]] = {}
     for key, value in metadata.metadata.items():
-        if value.HasField("string_value"):
+        if value.HasField("bool_value"):
+            out_metadata[key] = value.bool_value
+        elif value.HasField("string_value"):
             out_metadata[key] = value.string_value
         elif value.HasField("int_value"):
             out_metadata[key] = value.int_value
@@ -174,14 +177,20 @@ def to_proto_segment_scope(segment_scope: SegmentScope) -> proto.SegmentScope:
 
 
 def to_proto_metadata_update_value(
-    value: Union[str, int, float, None]
+    value: Union[str, int, float, bool, None]
 ) -> proto.UpdateMetadataValue:
-    if isinstance(value, str):
+    # Be careful with the order here. Since bools are a subtype of int in python,
+    # isinstance(value, bool) and isinstance(value, int) both return true
+    # for a value of bool type.
+    if isinstance(value, bool):
+        return proto.UpdateMetadataValue(bool_value=value)
+    elif isinstance(value, str):
         return proto.UpdateMetadataValue(string_value=value)
     elif isinstance(value, int):
         return proto.UpdateMetadataValue(int_value=value)
     elif isinstance(value, float):
         return proto.UpdateMetadataValue(float_value=value)
+    # None is used to delete the metadata key.
     elif value is None:
         return proto.UpdateMetadataValue()
     else:
@@ -195,6 +204,9 @@ def from_proto_collection(collection: proto.Collection) -> Collection:
     return Collection(
         id=UUID(hex=collection.id),
         name=collection.name,
+        configuration=CollectionConfigurationInternal.from_json_str(
+            collection.configuration_json_str
+        ),
         metadata=from_proto_metadata(collection.metadata)
         if collection.HasField("metadata")
         else None,
@@ -203,6 +215,7 @@ def from_proto_collection(collection: proto.Collection) -> Collection:
         else None,
         database=collection.database,
         tenant=collection.tenant,
+        version=collection.version,
     )
 
 
@@ -210,12 +223,14 @@ def to_proto_collection(collection: Collection) -> proto.Collection:
     return proto.Collection(
         id=collection["id"].hex,
         name=collection["name"],
+        configuration_json_str=collection.get_configuration().to_json_str(),
         metadata=None
         if collection["metadata"] is None
         else to_proto_update_metadata(collection["metadata"]),
         dimension=collection["dimension"],
         tenant=collection["tenant"],
         database=collection["database"],
+        version=collection["version"],
     )
 
 

@@ -1,3 +1,4 @@
+use super::record_segment::ApplyMaterializedLogError;
 use super::{SegmentFlusher, SegmentWriter};
 use crate::errors::{ChromaError, ErrorCodes};
 use crate::index::hnsw_provider::{
@@ -8,7 +9,7 @@ use crate::index::{
     HnswIndex, HnswIndexConfig, HnswIndexFromSegmentError, Index, IndexConfig,
     IndexConfigFromSegmentError,
 };
-use crate::types::{LogRecord, Operation, Segment};
+use crate::types::{LogRecord, MaterializedLogOperation, Operation, Segment};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -170,69 +171,52 @@ impl DistributedHNSWSegmentWriter {
             )))
         }
     }
-
-    pub(crate) fn query(&self, vector: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
-        let index = self.index.read();
-        index.query(vector, k)
-    }
 }
 
-impl SegmentWriter for DistributedHNSWSegmentWriter {
-    fn apply_materialized_log_chunk(
+impl<'a> SegmentWriter<'a> for DistributedHNSWSegmentWriter {
+    async fn apply_materialized_log_chunk(
         &self,
-        records: crate::execution::data::data_chunk::Chunk<super::MaterializedLogRecord>,
-    ) {
-        for record in records.iter() {
-            match record.0.log_record.record.operation {
-                Operation::Add => {
-                    let segment_offset_id = record.0.segment_offset_id;
-                    let embedding = record.0.log_record.record.embedding.as_ref().unwrap();
-                    self.index
-                        .read()
-                        .add(segment_offset_id as usize, &embedding);
+        records: crate::execution::data::data_chunk::Chunk<super::MaterializedLogRecord<'a>>,
+    ) -> Result<(), ApplyMaterializedLogError> {
+        for (record, _) in records.iter() {
+            match record.final_operation {
+                // If embedding is not found in case of adds it means that user
+                // did not supply them and thus we should return an error as
+                // opposed to panic.
+                MaterializedLogOperation::AddNew
+                | MaterializedLogOperation::UpdateExisting
+                | MaterializedLogOperation::OverwriteExisting => {
+                    let embedding = record.merged_embeddings();
+
+                    let mut index = self.index.upgradable_read();
+                    let index_len = index.len();
+                    let index_capacity = index.capacity();
+                    if index_len + 1 > index_capacity {
+                        index.with_upgraded(|index| {
+                            // Bump allocation by 2x
+                            index.resize(index_capacity * 2);
+                        });
+                    }
+
+                    index.add(record.offset_id as usize, embedding);
                 }
-                Operation::Upsert => {
-                    // hnsw index behavior is to treat add() as upsert
-                    let segment_offset_id = record.0.segment_offset_id;
-                    // Assumption: Upserts must have embedding set
-                    let embedding = record.0.log_record.record.embedding.as_ref().unwrap();
-                    self.index
-                        .read()
-                        .add(segment_offset_id as usize, &embedding);
+                MaterializedLogOperation::DeleteExisting => {
+                    // HNSW segment does not perform validation of any sort. So,
+                    // the assumption here is that the materialized log records
+                    // contain the correct offset ids pertaining to records that
+                    // are actually meant to be deleted.
+                    self.index.read().delete(record.offset_id as usize);
                 }
-                Operation::Update => {
-                    // hnsw index behvaior is to treat add() as upsert so this
-                    // will update the embedding
-                    // The assumption is that materialized log records only contain
-                    // valid updates.
-                    let segment_offset_id = record.0.segment_offset_id;
-                    match record.0.log_record.record.embedding.as_ref() {
-                        Some(e) => {
-                            self.index.read().add(segment_offset_id as usize, &e);
-                        }
-                        None => {
-                            // An update may not necessarily update the embedding
-                            continue;
-                        }
-                    };
-                }
-                Operation::Delete => {
-                    // The assumption is that materialized log records only contain
-                    // valid deletes
-                    let segment_offset_id = record.0.segment_offset_id;
-                    self.index.read().delete(segment_offset_id as usize);
-                }
+                MaterializedLogOperation::Initial => panic!(
+                    "Invariant violation. Mat records should not contain logs in initial state"
+                ),
             }
         }
-    }
-
-    fn apply_log_chunk(&self, records: crate::execution::data::data_chunk::Chunk<LogRecord>) {
-        todo!()
+        Ok(())
     }
 
     fn commit(self) -> Result<impl SegmentFlusher, Box<dyn ChromaError>> {
-        let hnsw_index_id = self.index.read().id;
-        let res = self.hnsw_index_provider.commit(&hnsw_index_id);
+        let res = self.hnsw_index_provider.commit(self.index.clone());
         match res {
             Ok(_) => Ok(self),
             Err(e) => Err(e),
@@ -329,17 +313,23 @@ impl DistributedHNSWSegmentReader {
                 }
             };
 
-            let index = match hnsw_index_provider
-                .open(&index_uuid, segment, dimensionality as i32)
-                .await
-            {
-                Ok(index) => index,
-                Err(e) => {
-                    return Err(Box::new(
-                        DistributedHNSWSegmentFromSegmentError::HnswIndexProviderOpenError(*e),
-                    ))
-                }
-            };
+            let index =
+                match hnsw_index_provider.get(&index_uuid) {
+                    Some(index) => index,
+                    None => {
+                        match hnsw_index_provider
+                            .open(&index_uuid, segment, dimensionality as i32)
+                            .await
+                        {
+                            Ok(index) => index,
+                            Err(e) => return Err(Box::new(
+                                DistributedHNSWSegmentFromSegmentError::HnswIndexProviderOpenError(
+                                    *e,
+                                ),
+                            )),
+                        }
+                    }
+                };
 
             Ok(Box::new(DistributedHNSWSegmentReader::new(
                 index,
@@ -353,8 +343,14 @@ impl DistributedHNSWSegmentReader {
         }
     }
 
-    pub(crate) fn query(&self, vector: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
+    pub(crate) fn query(
+        &self,
+        vector: &[f32],
+        k: usize,
+        allowed_ids: &[usize],
+        disallowd_ids: &[usize],
+    ) -> (Vec<usize>, Vec<f32>) {
         let index = self.index.read();
-        index.query(vector, k)
+        index.query(vector, k, allowed_ids, disallowd_ids)
     }
 }

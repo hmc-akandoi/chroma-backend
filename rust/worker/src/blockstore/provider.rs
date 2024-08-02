@@ -2,20 +2,28 @@ use super::arrow::provider::ArrowBlockfileProvider;
 use super::arrow::types::{
     ArrowReadableKey, ArrowReadableValue, ArrowWriteableKey, ArrowWriteableValue,
 };
+use super::config::BlockfileProviderConfig;
 use super::key::KeyWrapper;
-use super::memory::provider::HashMapBlockfileProvider;
+use super::memory::provider::MemoryBlockfileProvider;
 use super::memory::storage::{Readable, Writeable};
 use super::types::BlockfileWriter;
 use super::{BlockfileReader, Key, Value};
+use crate::blockstore::arrow::block::Block;
+use crate::blockstore::arrow::sparse_index::SparseIndex;
+use crate::cache::cache::Cache;
+use crate::config::Configurable;
 use crate::errors::ChromaError;
+use crate::storage::config::StorageConfig;
 use crate::storage::Storage;
+use async_trait::async_trait;
 use core::fmt::{self, Debug};
 use std::fmt::Formatter;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) enum BlockfileProvider {
-    HashMapBlockfileProvider(HashMapBlockfileProvider),
+    HashMapBlockfileProvider(MemoryBlockfileProvider),
     ArrowBlockfileProvider(ArrowBlockfileProvider),
 }
 
@@ -34,11 +42,21 @@ impl Debug for BlockfileProvider {
 
 impl BlockfileProvider {
     pub(crate) fn new_memory() -> Self {
-        BlockfileProvider::HashMapBlockfileProvider(HashMapBlockfileProvider::new())
+        BlockfileProvider::HashMapBlockfileProvider(MemoryBlockfileProvider::new())
     }
 
-    pub(crate) fn new_arrow(storage: Box<Storage>) -> Self {
-        BlockfileProvider::ArrowBlockfileProvider(ArrowBlockfileProvider::new(storage))
+    pub(crate) fn new_arrow(
+        storage: Storage,
+        max_block_size_bytes: usize,
+        block_cache: Cache<Uuid, Block>,
+        sparse_index_cache: Cache<Uuid, SparseIndex>,
+    ) -> Self {
+        BlockfileProvider::ArrowBlockfileProvider(ArrowBlockfileProvider::new(
+            storage,
+            max_block_size_bytes,
+            block_cache,
+            sparse_index_cache,
+        ))
     }
 
     pub(crate) async fn open<
@@ -79,42 +97,30 @@ impl BlockfileProvider {
     }
 }
 
-// =================== Interfaces ===================
+// =================== Configurable ===================
 
-/// A trait for opening and creating blockfiles
-/// # Methods
-/// - new: Create a new instance of the blockfile provider. A blockfile provider returns a Box<dyn Blockfile> of a given type.
-/// Currently, we support HashMap and Arrow-backed blockfiles.
-/// - open: Open a blockfile with the given id, returning a Box<dyn Blockfile> and error if it does not exist
-/// - create: Create a new blockfile. returning a Box<dyn Blockfile> and error if it already exists
-/// - fork: Fork the blockfile with the given id, returning a Box<dyn Blockfile> and error if it does not exist
-/// # Example
-/// ```ignore (TODO: This example is not runnable from outside the crate it seems. Fix this. Ignore for now.)
-/// use crate::blockstore::provider::HashMapBlockfileProvider;
-/// let mut provider = HashMapBlockfileProvider::new();
-/// let blockfile = provider.create("test")
-// /// ```
-// pub(crate) trait BlockfileProvider {
-//     fn open<
-//         'new,
-//         K: Key + Into<KeyWrapper> + ArrowReadableKey<'new> + 'new,
-//         V: Value + Readable<'new> + ArrowReadableValue<'new> + 'new,
-//     >(
-//         &self,
-//         id: &uuid::Uuid,
-//     ) -> Result<BlockfileReader<'new, K, V>, Box<OpenError>>;
-//     fn create<
-//         'new,
-//         K: Key + Into<KeyWrapper> + ArrowWriteableKey + 'new,
-//         V: Value + Writeable + ArrowWriteableValue + 'new,
-//     >(
-//         &self,
-//     ) -> Result<BlockfileWriter<K, V>, Box<CreateError>>;
-//     fn fork<K: Key + ArrowWriteableKey, V: Value + ArrowWriteableValue>(
-//         &self,
-//         id: &uuid::Uuid,
-//     ) -> Result<BlockfileWriter<K, V>, Box<CreateError>>;
-// }
+#[async_trait]
+impl Configurable<(BlockfileProviderConfig, Storage)> for BlockfileProvider {
+    async fn try_from_config(
+        config: &(BlockfileProviderConfig, Storage),
+    ) -> Result<Self, Box<dyn ChromaError>> {
+        let (blockfile_config, storage) = config;
+        match blockfile_config {
+            BlockfileProviderConfig::Arrow(blockfile_config) => {
+                Ok(BlockfileProvider::ArrowBlockfileProvider(
+                    ArrowBlockfileProvider::try_from_config(&(
+                        blockfile_config.clone(),
+                        storage.clone(),
+                    ))
+                    .await?,
+                ))
+            }
+            BlockfileProviderConfig::Memory => Ok(BlockfileProvider::HashMapBlockfileProvider(
+                MemoryBlockfileProvider::new(),
+            )),
+        }
+    }
+}
 
 // =================== Errors ===================
 #[derive(Error, Debug)]

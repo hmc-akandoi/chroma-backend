@@ -39,11 +39,11 @@ The `path` is where Chroma will store its database files on disk, and load them 
 const { ChromaClient } = require("chromadb");
 
 // ESM
-import { ChromaClient } from 'chromadb'
+import { ChromaClient } from "chromadb";
 ```
 
 {% note type="note" title="Connecting to the backend" %}
-To connect with the JS client, you must connect to a backend running Chroma. See `Running Chroma in client/server mode` for how to do this.
+To connect with the JS client, you must connect to a backend running Chroma. See [Running Chroma in client-server mode](#running-chroma-in-client-server-mode) for how to do this.
 {% /note %}
 
 ```js
@@ -77,7 +77,7 @@ await client.reset() # Empties and completely resets the database. ⚠️ This i
 
 {% /tabs %}
 
-## Running Chroma in client/server mode
+## Running Chroma in client-server mode
 
 {% tabs group="code-lang" hideTabs=true %}
 {% tab label="Python" %}
@@ -99,6 +99,26 @@ chroma_client = chromadb.HttpClient(host='localhost', port=8000)
 
 That's it! Chroma's API will run in `client-server` mode with just this change.
 
+---
+
+Chroma also provides an async HTTP client. The behaviors and method signatures are identical to the synchronous client, but all methods that would block are now async. To use it, call `AsyncHttpClient` instead:
+
+```python
+import asyncio
+import chromadb
+
+async def main():
+    client = await chromadb.AsyncHttpClient()
+    collection = await client.create_collection(name="my_collection")
+
+    await collection.add(
+        documents=["hello world"],
+        ids=["id1"]
+    )
+
+asyncio.run(main())
+```
+
 <!-- #### Run Chroma inside your application
 
 To run the Chroma docker from inside your application code, create a docker-compose file or add to the existing one you have.
@@ -114,9 +134,9 @@ Use following command to manage Dockerized Chroma:
 - __Command to Stop Chroma and delete volumes__
 This is distructive command. With this command volumes created earlier will be deleted along with data stored.: `docker-compose down -v` -->
 
-#### Using the python http-only client
+#### Using the Python HTTP-only client
 
-If you are running chroma in client-server mode, you may not need the full Chroma library. Instead, you can use the lightweight client-only library.
+If you are running Chroma in client-server mode, you may not need the full Chroma library. Instead, you can use the lightweight client-only library.
 In this case, you can install the `chromadb-client` package. This package is a lightweight HTTP client for the server with a minimal dependency footprint.
 
 ```python
@@ -127,6 +147,10 @@ pip install chromadb-client
 import chromadb
 # Example setup of the client to connect to your chroma server
 client = chromadb.HttpClient(host='localhost', port=8000)
+
+# Or for async usage:
+async def main():
+    client = await chromadb.AsyncHttpClient(host='localhost', port=8000)
 ```
 
 Note that the `chromadb-client` package is a subset of the full Chroma library and does not include all the dependencies. If you want to use the full Chroma library, you can install the `chromadb` package instead.
@@ -154,7 +178,7 @@ The JS client then talks to the chroma server backend.
 const { ChromaClient } = require("chromadb");
 
 // ESM
-import { ChromaClient } from 'chromadb'
+import { ChromaClient } from "chromadb";
 
 const client = new ChromaClient();
 ```
@@ -202,7 +226,7 @@ The embedding function takes text as input, and performs tokenization and embedd
 const { ChromaClient } = require("chromadb");
 
 // ESM
-import { ChromaClient } from 'chromadb'
+import { ChromaClient } from "chromadb";
 ```
 
 The JS client talks to a chroma server backend. This can run on your local computer or be easily deployed to AWS.
@@ -228,7 +252,7 @@ The embedding function takes text as input, and performs tokenization and embedd
 
 {% /tabs %}
 
-You can learn more about [🧬 embedding functions](./embeddings.md), and how to create your own.
+You can learn more about [🧬 embedding functions](./guides/embeddings), and how to create your own.
 
 {% tabs group="code-lang" hideTabs=true %}
 {% tab label="Python" %}
@@ -247,18 +271,19 @@ client.delete_collection(name="my_collection") # Delete a collection and all ass
 Existing collections can be retrieved by name with `.getCollection`, and deleted with `.deleteCollection`.
 
 ```javascript
-const collection = await client.getCollection({name: "test"}) # Get a collection object from an existing collection, by name. Will raise an exception of it's not found.
-await client.deleteCollection({name: "my_collection"}) # Delete a collection and all associated embeddings, documents, and metadata. ⚠️ This is destructive and not reversible
+const collection = await client.getCollection({ name: "test" }); // Get a collection object from an existing collection, by name. Will raise an exception of it's not found.
+collection = await client.getOrCreateCollection({ name: "test" }); // Get a collection object from an existing collection, by name. If it doesn't exist, create it.
+await client.deleteCollection(collection); // Delete a collection and all associated embeddings, documents, and metadata. ⚠️ This is destructive and not reversible
 ```
 
 {% /tab %}
 
 {% /tabs %}
 
-Collections have a few useful convenience methods.
-
 {% tabs group="code-lang" hideTabs=true %}
 {% tab label="Python" %}
+
+Collections have a few useful convenience methods.
 
 ```python
 collection.peek() # returns a list of the first 10 items in the collection
@@ -269,9 +294,11 @@ collection.modify(name="new_name") # Rename the collection
 {% /tab %}
 {% tab label="Javascript" %}
 
+There are a few useful convenience methods for working with Collections.
+
 ```javascript
-await collection.peek(); // returns a list of the first 10 items in the collection
-await collection.count(); // returns the number of items in the collection
+await client.peekRecords(collection); // returns a list of the first 10 items in the collection
+await client.countRecords(collection); // returns the number of items in the collection
 ```
 
 {% /tab %}
@@ -313,20 +340,20 @@ Valid options for `hnsw:space` are "l2", "ip, "or "cosine". The **default** is "
 {% special_table %}
 {% /special_table %}
 
-| Distance          | parameter | Equation |
-| ----------------- | :-------: | -------------------------------------------------------: |
-| Squared L2        |   `l2`    |                                       {% math latexText="d = \\sum\\left(A_i-B_i\\right)^2" %}{% /math %} |
-| Inner product     |   `ip`    |                                    {% math latexText="d = 1.0 - \\sum\\left(A_i \\times B_i\\right) " %}{% /math %} |
-| Cosine similarity | `cosine` | {% math latexText="d = 1.0 - \\frac{\\sum\\left(A_i \\times B_i\\right)}{\\sqrt{\\sum\\left(A_i^2\\right)} \\cdot \\sqrt{\\sum\\left(B_i^2\\right)}}" %}{% /math %} |
+| Distance          | parameter |                                                                                                                                                            Equation |
+| ----------------- | :-------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| Squared L2        |   `l2`    |                                                                                                 {% math latexText="d = \\sum\\left(A_i-B_i\\right)^2" %}{% /math %} |
+| Inner product     |   `ip`    |                                                                                    {% math latexText="d = 1.0 - \\sum\\left(A_i \\times B_i\\right) " %}{% /math %} |
+| Cosine similarity | `cosine`  | {% math latexText="d = 1.0 - \\frac{\\sum\\left(A_i \\times B_i\\right)}{\\sqrt{\\sum\\left(A_i^2\\right)} \\cdot \\sqrt{\\sum\\left(B_i^2\\right)}}" %}{% /math %} |
 
 ### Adding data to a Collection
+
+{% tabs group="code-lang" hideTabs=true %}
+{% tab label="Python" %}
 
 Add data to Chroma with `.add`.
 
 Raw documents:
-
-{% tabs group="code-lang" hideTabs=true %}
-{% tab label="Python" %}
 
 ```python
 collection.add(
@@ -339,8 +366,12 @@ collection.add(
 {% /tab %}
 {% tab label="Javascript" %}
 
+Add data to Chroma with `.addRecords`.
+
+Raw documents:
+
 ```javascript
-await collection.add({
+await client.addRecords(collection, {
     ids: ["id1", "id2", "id3", ...],
     metadatas: [{"chapter": "3", "verse": "16"}, {"chapter": "3", "verse": "5"}, {"chapter": "29", "verse": "11"}, ...],
     documents: ["lorem ipsum...", "doc2", "doc3", ...],
@@ -378,7 +409,7 @@ collection.add(
 {% tab label="Javascript" %}
 
 ```javascript
-await collection.add({
+await client.addRecords(collection, {
     ids: ["id1", "id2", "id3", ...],
     embeddings: [[1.1, 2.3, 3.2], [4.5, 6.9, 4.4], [1.1, 2.3, 3.2], ...],
     metadatas: [{"chapter": "3", "verse": "16"}, {"chapter": "3", "verse": "5"}, {"chapter": "29", "verse": "11"}, ...],
@@ -410,7 +441,7 @@ collection.add(
 {% tab label="Javascript" %}
 
 ```javascript
-await collection.add({
+await client.addRecords(collection, {
     ids: ["id1", "id2", "id3", ...],
     embeddings: [[1.1, 2.3, 3.2], [4.5, 6.9, 4.4], [1.1, 2.3, 3.2], ...],
     metadatas: [{"chapter": "3", "verse": "16"}, {"chapter": "3", "verse": "5"}, {"chapter": "29", "verse": "11"}, ...],
@@ -423,12 +454,12 @@ await collection.add({
 
 ### Querying a Collection
 
-Chroma collections can be queried in a variety of ways, using the `.query` method.
-
 You can query by a set of `query_embeddings`.
 
 {% tabs group="code-lang" hideTabs=true %}
 {% tab label="Python" %}
+
+Chroma collections can be queried in a variety of ways, using the `.query` method.
 
 ```python
 collection.query(
@@ -442,17 +473,19 @@ collection.query(
 {% /tab %}
 {% tab label="Javascript" %}
 
+Chroma collections can be queried in a variety of ways, using the `.queryRecords` method.
+
 ```javascript
-const result = await collection.query({
+const result = await client.queryRecords(collection, {
     queryEmbeddings: [[11.1, 12.1, 13.1],[1.1, 2.3, 3.2], ...],
     nResults: 10,
     where: {"metadata_field": "is_equal_to_this"},
 })
 // input order
-// query_embeddings - optional
+// queryEmbeddings - optional, exactly one of queryEmbeddings and queryTexts must be provided
+// queryTexts - optional
 // n_results - required
 // where - optional
-// query_texts - optional
 ```
 
 {% /tab %}
@@ -492,17 +525,17 @@ collection.get(
 {% tab label="Javascript" %}
 
 ```javascript
-await collection.query({
+await client.queryRecords(collection, {
     nResults: 10, // n_results
     where: {"metadata_field": "is_equal_to_this"}, // where
     queryTexts: ["doc10", "thus spake zarathustra", ...], // query_text
 })
 ```
 
-You can also retrieve items from a collection by `id` using `.get`.
+You can also retrieve records from a collection by `id` using `.getRecords`.
 
 ```javascript
-await collection.get({
+await client.getRecords(collection, {
 	ids: ["id1", "id2", "id3", ...], //ids
 	where: {"style": "style1"} // where
 })
@@ -518,18 +551,39 @@ await collection.get({
 
 When using get or query you can use the include parameter to specify which data you want returned - any of `embeddings`, `documents`, `metadatas`, and for query, `distances`. By default, Chroma will return the `documents`, `metadatas` and in the case of query, the `distances` of the results. `embeddings` are excluded by default for performance and the `ids` are always returned. You can specify which of these you want returned by passing an array of included field names to the includes parameter of the query or get method.
 
+{% tabs group="code-lang" hideTabs=true %}
+{% tab label="Python" %}
+
 ```python
-
 # Only get documents and ids
-collection.get({
-    include: [ "documents" ]
-})
+collection.get(
+    include=["documents"]
+)
 
-collection.query({
-    queryEmbeddings: [[11.1, 12.1, 13.1],[1.1, 2.3, 3.2], ...],
-    include: [ "documents" ]
+collection.query(
+    query_embeddings=[[11.1, 12.1, 13.1],[1.1, 2.3, 3.2], ...],
+    include=["documents"]
+)
+```
+
+{% /tab %}
+{% tab label="Javascript" %}
+
+```javascript
+# Only get documents and ids
+client.getRecords(collection,
+    {include=["documents"]}
+)
+
+client.getRecords(collection, {
+    queryEmbeddings=[[11.1, 12.1, 13.1],[1.1, 2.3, 3.2], ...],
+    include=["documents"]
 })
 ```
+
+{% /tab %}
+
+{% /tabs %}
 
 ### Using Where filters
 
@@ -664,16 +718,25 @@ An `$nin` operator will return results where the metadata attribute is not part 
 }
 ```
 
+{% tabs group="code-lang" hideTabs=true %}
+{% tab label="Python" %}
+
 {% note type="note" title="Practical examples" %}
 For additional examples and a demo how to use the inclusion operators, please see provided notebook [here](https://github.com/chroma-core/chroma/blob/main/examples/basic_functionality/in_not_in_filtering.ipynb)
 {% /note %}
 
-{% tabs group="code-lang" hideTabs=true %}
-{% tab label="Python" %}
+{% /tab %}
+{% tab label="Javascript" %}
+{% /tab %}
+
+{% /tabs %}
 
 ### Updating data in a collection
 
-Any property of items in a collection can be updated using `.update`.
+{% tabs group="code-lang" hideTabs=true %}
+{% tab label="Python" %}
+
+Any property of records in a collection can be updated using `.update`.
 
 ```python
 collection.update(
@@ -686,6 +749,20 @@ collection.update(
 
 {% /tab %}
 {% tab label="Javascript" %}
+
+Any property of records in a collection can be updated using `.updateRecords`.
+
+```javascript
+client.updateRecords(
+    collection,
+    {
+      ids: ["id1", "id2", "id3", ...],
+      embeddings: [[1.1, 2.3, 3.2], [4.5, 6.9, 4.4], [1.1, 2.3, 3.2], ...],
+      metadatas: [{"chapter": "3", "verse": "16"}, {"chapter": "3", "verse": "5"}, {"chapter": "29", "verse": "11"}, ...],
+      documents: ["doc1", "doc2", "doc3", ...],
+    },
+)
+```
 
 {% /tab %}
 
@@ -713,7 +790,7 @@ collection.upsert(
 {% tab label="Javascript" %}
 
 ```javascript
-await collection.upsert({
+await client.upsertRecords(collection, {
   ids: ["id1", "id2", "id3"],
   embeddings: [
     [1.1, 2.3, 3.2],
@@ -728,7 +805,6 @@ await collection.upsert({
   documents: ["doc1", "doc2", "doc3"],
 });
 ```
-
 
 {% /tab %}
 
@@ -755,7 +831,7 @@ collection.delete(
 {% tab label="Javascript" %}
 
 ```javascript
-await collection.delete({
+await client.deleteRecords(collection, {
     ids: ["id1", "id2", "id3",...], //ids
 	where: {"chapter": "20"} //where
 })
@@ -766,180 +842,3 @@ await collection.delete({
 {% /tabs %}
 
 `.delete` also supports the `where` filter. If no `ids` are supplied, it will delete all items in the collection that match the `where` filter.
-
-## Authentication
-
-You can configure Chroma to use authentication when in server/client mode only.
-
-Supported authentication methods:
-
-{% special_table %}
-{% /special_table %}
-
-| Authentication Method | Basic Auth (Pre-emptive)                                                                                                  | Static API Token                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Description           | [RFC 7617](https://www.rfc-editor.org/rfc/rfc7617) Basic Auth with `user:password` base64-encoded `Authorization` header. | Static auth token in `Authorization: Bearer <token>` or in `X-Chroma-Token: <token>` headers. |
-| Status                | `Alpha`                                                                                                                   | `Alpha`                                                                                       |
-| Server-Side Support   | ✅ `Alpha`                                                                                                                | ✅ `Alpha`                                                                                    |
-| Client/Python         | ✅ `Alpha`                                                                                                                | ✅ `Alpha`                                                                                    |
-| Client/JS             | ✅ `Alpha`                                                                                                                | ✅ `Alpha`                                                                                    |
-
-### Basic Authentication
-
-#### Server Setup
-
-##### Generate Server-Side Credentials
-
-{% note type="note" title="Security Practices" %}
-A good security practice is to store the password securely. In the example below we use bcrypt (currently the only supported hash in Chroma server side auth) to hash the plaintext password.
-{% /note %}
-
-To generate the password hash, run the following command. Note that you will need to have `htpasswd` installed on your system.
-
-```bash
-htpasswd -Bbn admin admin > server.htpasswd
-```
-
-##### Running the Server
-
-Set the following environment variables:
-
-```bash
-export CHROMA_SERVER_AUTH_CREDENTIALS_FILE="server.htpasswd"
-export CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER="chromadb.auth.providers.HtpasswdFileServerAuthCredentialsProvider"
-export CHROMA_SERVER_AUTH_PROVIDER="chromadb.auth.basic.BasicAuthServerProvider"
-```
-
-And run the server as normal:
-
-```bash
-chroma run --path /db_path
-```
-
-{% tabs group="code-lang" hideTabs=true %}
-{% tab label="Python" %}
-
-#### Client Setup
-
-```python
-import chromadb
-from chromadb.config import Settings
-
-client = chromadb.HttpClient(
-  settings=Settings(chroma_client_auth_provider="chromadb.auth.basic.BasicAuthClientProvider",chroma_client_auth_credentials="admin:admin"))
-client.heartbeat()  # this should work with or without authentication - it is a public endpoint
-
-client.get_version()  # this should work with or without authentication - it is a public endpoint
-
-client.list_collections()  # this is a protected endpoint and requires authentication
-```
-
-{% /tab %}
-{% tab label="Javascript" %}
-
-#### Client Setup
-
-```js
-import { ChromaClient } from "chromadb";
-
-const client = new ChromaClient({
-  auth: { provider: "basic", credentials: "admin:admin" },
-});
-```
-
-
-{% /tab %}
-
-{% /tabs %}
-
-### Static API Token Authentication
-
-{% note type="note" title="Tokens" %}
-Tokens must be alphanumeric ASCII strings. Tokens are case-sensitive.
-{% /note %}
-
-#### Server Setup
-
-{% note type="note" title="Security Note" %}
-Current implementation of static API token auth supports only ENV based tokens.
-{% /note %}
-
-##### Running the Server
-
-Set the following environment variables to use `Authorization: Bearer test-token` to be your authentication header.
-
-```bash
-export CHROMA_SERVER_AUTH_CREDENTIALS="test-token"
-export CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER="chromadb.auth.token.TokenConfigServerAuthCredentialsProvider"
-export CHROMA_SERVER_AUTH_PROVIDER="chromadb.auth.token.TokenAuthServerProvider"
-```
-
-to use `X-Chroma-Token: test-token` type of authentication header you can set an additional environment variable.
-
-```bash
-export CHROMA_SERVER_AUTH_CREDENTIALS="test-token"
-export CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER="chromadb.auth.token.TokenConfigServerAuthCredentialsProvider"
-export CHROMA_SERVER_AUTH_PROVIDER="chromadb.auth.token.TokenAuthServerProvider"
-export CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER="X_CHROMA_TOKEN"
-```
-
-{% tabs group="code-lang" hideTabs=true %}
-{% tab label="Python" %}
-
-#### Client Setup
-
-```python
-import chromadb
-from chromadb.config import Settings
-
-client = chromadb.HttpClient(
-    settings=Settings(chroma_client_auth_provider="chromadb.auth.token.TokenAuthClientProvider",
-                      chroma_client_auth_credentials="test-token"))
-client.heartbeat()  # this should work with or without authentication - it is a public endpoint
-
-client.get_version()  # this should work with or without authentication - it is a public endpoint
-
-client.list_collections()  # this is a protected endpoint and requires authentication
-```
-
-{% /tab %}
-{% tab label="Javascript" %}
-
-#### Client Setup
-
-Using the default `Authorization: Bearer <token>` header:
-
-```js
-import { ChromaClient } from "chromadb";
-
-const client = new ChromaClient({
-  auth: { provider: "token", credentials: "test-token" },
-});
-//or explicitly specifying the auth header type
-const client = new ChromaClient({
-  auth: {
-    provider: "token",
-    credentials: "test-token",
-    providerOptions: { headerType: "AUTHORIZATION" },
-  },
-});
-```
-
-Using custom Chroma auth token `X-Chroma-Token: <token>` header:
-
-```js
-import { ChromaClient } from "chromadb";
-
-const client = new ChromaClient({
-  auth: {
-    provider: "token",
-    credentials: "test-token",
-    providerOptions: { headerType: "X_CHROMA_TOKEN" },
-  },
-});
-```
-
-
-{% /tab %}
-
-{% /tabs %}

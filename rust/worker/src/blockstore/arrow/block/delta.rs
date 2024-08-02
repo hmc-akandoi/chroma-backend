@@ -1,15 +1,9 @@
-use super::delta_storage::{BlockKeyArrowBuilder, BlockStorage, StringValueStorage};
+use super::delta_storage::BlockStorage;
 use crate::blockstore::{
-    arrow::{
-        blockfile::MAX_BLOCK_SIZE,
-        types::{ArrowWriteableKey, ArrowWriteableValue},
-    },
-    key::{CompositeKey, KeyWrapper},
+    arrow::types::{ArrowWriteableKey, ArrowWriteableValue},
+    key::CompositeKey,
 };
-use arrow::{
-    array::{RecordBatch, StringBuilder},
-    util::bit_util,
-};
+use arrow::{array::RecordBatch, util::bit_util};
 use uuid::Uuid;
 
 /// A block delta tracks a source block and represents the new state of a block. Blocks are
@@ -18,8 +12,6 @@ use uuid::Uuid;
 /// can be converted to a block data, which is then used to create a new block. A block data
 /// can be converted into a block delta for new writes.
 /// # Methods
-/// - can_add: checks if a key value pair can be added to the block delta and still be within the
-///  max block size.
 /// - add: adds a key value pair to the block delta.
 /// - delete: deletes a key from the block delta.
 /// - get_min_key: gets the minimum key in the block delta.
@@ -33,6 +25,8 @@ pub struct BlockDelta {
 
 impl BlockDelta {
     /// Creates a new block delta from a block.
+    /// # Arguments
+    /// - id: the id of the block delta.
     pub fn new<K: ArrowWriteableKey, V: ArrowWriteableValue>(id: Uuid) -> Self {
         BlockDelta {
             builder: V::get_delta_builder(),
@@ -42,40 +36,6 @@ impl BlockDelta {
 }
 
 impl BlockDelta {
-    /// Checks if a key value pair can be added to the block delta and still be within the
-    /// max block size.
-    pub fn can_add<K: ArrowWriteableKey, V: ArrowWriteableValue>(
-        &self,
-        prefix: &str,
-        key: &K,
-        value: &V,
-    ) -> bool {
-        let additional_prefix_size = prefix.len();
-        let additional_key_size = key.get_size();
-        let additional_value_size = value.get_size();
-
-        let prefix_data_size = self.builder.get_prefix_size(0, self.len()) + additional_prefix_size;
-        let key_data_size = self.builder.get_key_size(0, self.len()) + additional_key_size;
-        let value_data_size = self.builder.get_value_size(0, self.len()) + additional_value_size;
-
-        let prefix_offset_size = bit_util::round_upto_multiple_of_64((self.builder.len() + 1) * 4);
-        let key_offset_size = K::offset_size(self.builder.len() + 1);
-        let value_offset_size = V::offset_size(self.builder.len() + 1);
-
-        let prefix_total_bytes =
-            bit_util::round_upto_multiple_of_64(prefix_data_size) + prefix_offset_size;
-        let key_total_bytes = bit_util::round_upto_multiple_of_64(key_data_size) + key_offset_size;
-        let value_total_bytes =
-            bit_util::round_upto_multiple_of_64(value_data_size) + value_offset_size;
-        let total_future_size = prefix_total_bytes + key_total_bytes + value_total_bytes;
-
-        if total_future_size > MAX_BLOCK_SIZE {
-            return false;
-        }
-
-        total_future_size <= MAX_BLOCK_SIZE
-    }
-
     /// Adds a key value pair to the block delta.
     pub fn add<K: ArrowWriteableKey, V: ArrowWriteableValue>(
         &self,
@@ -84,7 +44,7 @@ impl BlockDelta {
         value: V,
     ) {
         // TODO: errors?
-        V::add(prefix, key.into(), value, self)
+        V::add(prefix, key.into(), value, self);
     }
 
     /// Deletes a key from the block delta.
@@ -105,7 +65,9 @@ impl BlockDelta {
     ///  where applicable. The size is rounded up to the nearest 64 bytes as per
     ///  the arrow specification. When a block delta is converted into a block data
     ///  the same sizing is used to allocate the memory for the block data.
-    fn get_size<K: ArrowWriteableKey, V: ArrowWriteableValue>(&self) -> usize {
+    pub(in crate::blockstore::arrow) fn get_size<K: ArrowWriteableKey, V: ArrowWriteableValue>(
+        &self,
+    ) -> usize {
         let prefix_data_size = self.builder.get_prefix_size(0, self.len());
         let key_data_size = self.builder.get_key_size(0, self.len());
         let value_data_size = self.builder.get_value_size(0, self.len());
@@ -134,6 +96,7 @@ impl BlockDelta {
 
         let value_total_bytes = bit_util::round_upto_multiple_of_64(value_size);
         let value_offset_bytes = V::offset_size(item_count);
+        let value_validity_bytes = V::validity_size(item_count);
 
         prefix_total_bytes
             + prefix_offset_bytes
@@ -141,6 +104,7 @@ impl BlockDelta {
             + key_offset_bytes
             + value_total_bytes
             + value_offset_bytes
+            + value_validity_bytes
     }
 
     pub fn finish<K: ArrowWriteableKey, V: ArrowWriteableValue>(&self) -> RecordBatch {
@@ -155,68 +119,72 @@ impl BlockDelta {
     /// A tuple containing the the key of the split point and the new block delta.
     /// The new block delta contains all the key value pairs after, but not including the
     /// split point.
-    /// # Panics
-    /// This function will panic if their is no split point found. This should never happen
-    /// as we should only call this function if can_add returns false.
     pub fn split<'referred_data, K: ArrowWriteableKey, V: ArrowWriteableValue>(
         &'referred_data self,
-    ) -> (CompositeKey, BlockDelta) {
-        let half_size = MAX_BLOCK_SIZE / 2;
-        let mut running_prefix_size = 0;
-        let mut running_key_size = 0;
-        let mut running_value_size = 0;
-        let mut running_count = 0;
+        max_block_size_bytes: usize,
+    ) -> Vec<(CompositeKey, BlockDelta)> {
+        let half_size = max_block_size_bytes / 2;
 
-        // The split key will be the last key that pushes the block over the half size. Not the first key that pushes it over
-        let mut split_key = None;
-        for i in 1..self.len() {
-            // TODO: change this interface to be more ergo
-            running_prefix_size += self.builder.get_prefix_size(i - 1, i);
-            running_key_size += self.builder.get_key_size(i - 1, i);
-            running_value_size += self.builder.get_value_size(i - 1, i);
-            running_count += 1;
+        let mut blocks_to_split = Vec::new();
+        blocks_to_split.push(self.clone());
+        let mut output = Vec::new();
+        let mut first_iter = true;
+        // iterate over all blocks to split until its empty
+        while !blocks_to_split.is_empty() {
+            let curr_block = blocks_to_split.pop().unwrap();
+            let mut curr_split_index = 0;
+            let mut curr_running_prefix_size = 0;
+            let mut curr_running_key_size = 0;
+            let mut curr_running_value_size = 0;
+            let mut curr_running_count = 0;
+            for i in 1..curr_block.len() {
+                curr_running_prefix_size += curr_block.builder.get_prefix_size(i - 1, i);
+                curr_running_key_size += curr_block.builder.get_key_size(i - 1, i);
+                curr_running_value_size += curr_block.builder.get_value_size(i - 1, i);
+                curr_running_count += 1;
 
-            let current_size = self.get_block_size::<K, V>(
-                running_count,
-                running_prefix_size,
-                running_key_size,
-                running_value_size,
-            );
+                let current_size = curr_block.get_block_size::<K, V>(
+                    curr_running_count,
+                    curr_running_prefix_size,
+                    curr_running_key_size,
+                    curr_running_value_size,
+                );
 
-            if current_size > half_size {
-                if i + 1 < self.len() {
-                    split_key = Some(self.builder.get_key(i));
-                } else {
-                    split_key = Some(self.builder.get_key(i - 1));
+                if current_size > half_size {
+                    break;
                 }
-                break;
+                curr_split_index = i;
+            }
+
+            // The split() method is exclusive of the split index. Meaning
+            // the new block will contain the key at the split index. So we increment
+            // the split index by 1 to get the correct split point.
+            curr_split_index = std::cmp::min(curr_split_index + 1, curr_block.len() - 1);
+
+            let split_key = curr_block.builder.get_key(curr_split_index);
+            let new_delta = curr_block
+                .builder
+                .split(&split_key.prefix, split_key.key.clone());
+            let new_block = BlockDelta {
+                builder: new_delta,
+                id: Uuid::new_v4(),
+            };
+            if first_iter {
+                first_iter = false;
+            } else {
+                output.push((curr_block.builder.get_key(0).clone(), curr_block));
+            }
+            if new_block.get_size::<K, V>() > max_block_size_bytes {
+                blocks_to_split.push(new_block);
+            } else {
+                output.push((split_key.clone(), new_block));
             }
         }
 
-        match &split_key {
-            // Note: Consider returning a Result instead of panicking
-            // This should never happen as we should only call this
-            // function if can_add returns false. But it may be worth making
-            // this compile time safe.
-            None => panic!("No split point found"),
-            Some(split_key) => {
-                // TODO: standardize on composite key vs split key
-                let split_after = self.builder.split(&split_key.prefix, split_key.key.clone());
-                let new_delta = BlockDelta {
-                    builder: split_after,
-                    id: Uuid::new_v4(),
-                };
-                return (split_key.clone(), new_delta);
-            }
-        }
+        return output;
     }
 
-    // fn get_value_count(&self) -> usize {
-    //     let inner = self.inner.read();
-    //     inner.get_value_count()
-    // }
-
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.builder.len()
     }
 }
@@ -224,10 +192,12 @@ impl BlockDelta {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::cache::cache::Cache;
+    use crate::cache::config::CacheConfig;
+    use crate::cache::config::UnboundedCacheConfig;
     use crate::{
-        blockstore::{
-            arrow::{block::Block, provider::BlockManager},
-            types::Key,
+        blockstore::arrow::{
+            block::Block, config::TEST_MAX_BLOCK_SIZE_BYTES, provider::BlockManager,
         },
         segment::DataRecord,
         storage::{local::LocalStorage, Storage},
@@ -236,15 +206,30 @@ mod test {
     use arrow::array::Int32Array;
     use rand::{random, Rng};
     use roaring::RoaringBitmap;
-    use std::{collections::HashMap, hash::Hash};
+    use std::collections::HashMap;
+
+    /// Saves a block to a random file under the given path, then loads the block
+    /// and validates that the loaded block has the same size as the original block.
+    /// ### Returns
+    /// - The loaded block
+    /// ### Notes
+    /// - Assumes that path will be cleaned up by the caller
+    fn test_save_load_size(path: &str, block: &Block) -> Block {
+        let save_path = format!("{}/{}", path, random::<u32>());
+        block.save(&save_path).unwrap();
+        let loaded = Block::load_with_validation(&save_path, block.id).unwrap();
+        assert_eq!(loaded.id, block.id);
+        assert_eq!(block.get_size(), loaded.get_size());
+        loaded
+    }
 
     #[tokio::test]
     async fn test_sizing_int_arr_val() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let storage = Box::new(Storage::Local(LocalStorage::new(
-            tmp_dir.path().to_str().unwrap(),
-        )));
-        let block_manager = BlockManager::new(storage);
+        let path = tmp_dir.path().to_str().unwrap();
+        let storage = Storage::Local(LocalStorage::new(path));
+        let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
+        let block_manager = BlockManager::new(storage, TEST_MAX_BLOCK_SIZE_BYTES, cache);
         let delta = block_manager.create::<&str, &Int32Array>();
 
         let n = 2000;
@@ -262,18 +247,32 @@ mod test {
         let size = delta.get_size::<&str, &Int32Array>();
         // TODO: should commit take ownership of delta?
         // Semantically, that makes sense, since a delta is unsuable after commit
-        block_manager.commit::<&str, &Int32Array>(&delta);
-        let block = block_manager.get(&delta.id).await.unwrap();
+
+        let block = block_manager.commit::<&str, &Int32Array>(&delta);
+        let mut values_before_flush = vec![];
+        for i in 0..n {
+            let key = format!("key{}", i);
+            let read = block.get::<&str, Int32Array>("prefix", &key).unwrap();
+            values_before_flush.push(read);
+        }
+        block_manager.flush(&block).await.unwrap();
+        let block = block_manager.get(&block.clone().id).await.unwrap();
+        for i in 0..n {
+            let key = format!("key{}", i);
+            let read = block.get::<&str, Int32Array>("prefix", &key).unwrap();
+            assert_eq!(read, values_before_flush[i]);
+        }
+        test_save_load_size(path, &block);
         assert_eq!(size, block.get_size());
     }
 
     #[tokio::test]
     async fn test_sizing_string_val() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let storage = Box::new(Storage::Local(LocalStorage::new(
-            tmp_dir.path().to_str().unwrap(),
-        )));
-        let block_manager = BlockManager::new(storage);
+        let path = tmp_dir.path().to_str().unwrap();
+        let storage = Storage::Local(LocalStorage::new(tmp_dir.path().to_str().unwrap()));
+        let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
+        let block_manager = BlockManager::new(storage, TEST_MAX_BLOCK_SIZE_BYTES, cache);
         let delta = block_manager.create::<&str, &str>();
         let delta_id = delta.id.clone();
 
@@ -285,21 +284,26 @@ mod test {
             delta.add(prefix, key.as_str(), value.as_str());
         }
         let size = delta.get_size::<&str, &str>();
-        block_manager.commit::<&str, &str>(&delta);
+        let block = block_manager.commit::<&str, &str>(&delta);
+        let mut values_before_flush = vec![];
+        for i in 0..n {
+            let key = format!("key{}", i);
+            let read = block.get::<&str, &str>("prefix", &key);
+            values_before_flush.push(read.unwrap().to_string());
+        }
+        block_manager.flush(&block).await.unwrap();
+
         let block = block_manager.get(&delta_id).await.unwrap();
+        // TODO: enable this assertion after the sizing is fixed
         assert_eq!(size, block.get_size());
         for i in 0..n {
             let key = format!("key{}", i);
             let read = block.get::<&str, &str>("prefix", &key);
-            assert_eq!(read, Some(format!("value{}", i).as_str()));
+            assert_eq!(read.unwrap().to_string(), values_before_flush[i]);
         }
 
         // test save/load
-        block.save("test.arrow").unwrap();
-        let loaded = Block::load("test.arrow", delta_id).unwrap();
-        assert_eq!(loaded.id, delta_id);
-        // TODO: make this sizing work
-        // assert_eq!(block.get_size(), loaded.get_size());
+        let loaded = test_save_load_size(path, &block);
         for i in 0..n {
             let key = format!("key{}", i);
             let read = loaded.get::<&str, &str>("prefix", &key);
@@ -307,9 +311,10 @@ mod test {
         }
 
         // test fork
-        let forked_block = block_manager.fork::<&str, &str>(&delta_id);
+        let forked_block = block_manager.fork::<&str, &str>(&delta_id).await;
         let new_id = forked_block.id.clone();
-        block_manager.commit::<&str, &str>(&forked_block);
+        let block = block_manager.commit::<&str, &str>(&forked_block);
+        block_manager.flush(&block).await.unwrap();
         let forked_block = block_manager.get(&new_id).await.unwrap();
         for i in 0..n {
             let key = format!("key{}", i);
@@ -321,10 +326,10 @@ mod test {
     #[tokio::test]
     async fn test_sizing_float_key() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let storage = Box::new(Storage::Local(LocalStorage::new(
-            tmp_dir.path().to_str().unwrap(),
-        )));
-        let block_manager = BlockManager::new(storage);
+        let path = tmp_dir.path().to_str().unwrap();
+        let storage = Storage::Local(LocalStorage::new(path));
+        let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
+        let block_manager = BlockManager::new(storage, TEST_MAX_BLOCK_SIZE_BYTES, cache);
         let delta = block_manager.create::<f32, &str>();
 
         let n = 2000;
@@ -336,18 +341,32 @@ mod test {
         }
 
         let size = delta.get_size::<f32, &str>();
-        block_manager.commit::<f32, &str>(&delta);
+        let block = block_manager.commit::<f32, &str>(&delta);
+        let mut values_before_flush = vec![];
+        for i in 0..n {
+            let key = i as f32;
+            let read = block.get::<f32, &str>("prefix", key).unwrap();
+            values_before_flush.push(read);
+        }
+        block_manager.flush(&block).await.unwrap();
         let block = block_manager.get(&delta.id).await.unwrap();
         assert_eq!(size, block.get_size());
+        for i in 0..n {
+            let key = i as f32;
+            let read = block.get::<f32, &str>("prefix", key).unwrap();
+            assert_eq!(read, values_before_flush[i]);
+        }
+        // test save/load
+        test_save_load_size(path, &block);
     }
 
     #[tokio::test]
     async fn test_sizing_roaring_bitmap_val() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let storage = Box::new(Storage::Local(LocalStorage::new(
-            tmp_dir.path().to_str().unwrap(),
-        )));
-        let block_manager = BlockManager::new(storage);
+        let path = tmp_dir.path().to_str().unwrap();
+        let storage = Storage::Local(LocalStorage::new(path));
+        let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
+        let block_manager = BlockManager::new(storage, TEST_MAX_BLOCK_SIZE_BYTES, cache);
         let delta = block_manager.create::<&str, &RoaringBitmap>();
 
         let n = 2000;
@@ -359,8 +378,10 @@ mod test {
         }
 
         let size = delta.get_size::<&str, &RoaringBitmap>();
-        block_manager.commit::<&str, &RoaringBitmap>(&delta);
+        let block = block_manager.commit::<&str, &RoaringBitmap>(&delta);
+        block_manager.flush(&block).await.unwrap();
         let block = block_manager.get(&delta.id).await.unwrap();
+        // TODO: enable this assertion after the sizing is fixed
         assert_eq!(size, block.get_size());
 
         for i in 0..n {
@@ -369,15 +390,18 @@ mod test {
             let expected = RoaringBitmap::from_iter((0..i).map(|x| x as u32));
             assert_eq!(read, Some(expected));
         }
+
+        // test save/load
+        test_save_load_size(path, &block);
     }
 
     #[tokio::test]
     async fn test_data_record() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let storage = Box::new(Storage::Local(LocalStorage::new(
-            tmp_dir.path().to_str().unwrap(),
-        )));
-        let block_manager = BlockManager::new(storage);
+        let path = tmp_dir.path().to_str().unwrap();
+        let storage = Storage::Local(LocalStorage::new(path));
+        let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
+        let block_manager = BlockManager::new(storage, TEST_MAX_BLOCK_SIZE_BYTES, cache);
         let ids = vec!["embedding_id_2", "embedding_id_0", "embedding_id_1"];
         let embeddings = vec![
             vec![1.0, 2.0, 3.0],
@@ -418,7 +442,8 @@ mod test {
         }
 
         let size = delta.get_size::<&str, &DataRecord>();
-        block_manager.commit::<&str, &DataRecord>(&delta);
+        let block = block_manager.commit::<&str, &DataRecord>(&delta);
+        block_manager.flush(&block).await.unwrap();
         let block = block_manager.get(&delta.id).await.unwrap();
         for i in 0..3 {
             let read = block.get::<&str, DataRecord>("", ids[i]).unwrap();
@@ -428,23 +453,35 @@ mod test {
             assert_eq!(read.document, documents[i]);
         }
         assert_eq!(size, block.get_size());
+
+        // test save/load
+        test_save_load_size(path, &block);
     }
 
-    // #[test]
-    // fn test_sizing_uint_key_val() {
-    //     let block_provider = ArrowBlockProvider::new();
-    //     let block = block_provider.create_block(KeyType::Uint, ValueType::Uint);
-    //     let delta = BlockDelta::from(block.clone());
+    #[tokio::test]
+    async fn test_sizing_uint_key_val() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().to_str().unwrap();
+        let storage = Storage::Local(LocalStorage::new(path));
+        let cache = Cache::new(&CacheConfig::Unbounded(UnboundedCacheConfig {}));
+        let block_manager = BlockManager::new(storage, TEST_MAX_BLOCK_SIZE_BYTES, cache);
+        let delta = block_manager.create::<u32, &str>();
 
-    //     let n = 2000;
-    //     for i in 0..n {
-    //         let key = BlockfileKey::new("prefix".to_string(), Key::Uint(i as u32));
-    //         let value = Value::UintValue(i as u32);
-    //         delta.add(key, value);
-    //     }
+        let n = 2000;
+        for i in 0..n {
+            let prefix = "prefix";
+            let key = i as u32;
+            let value = format!("value{}", i);
+            delta.add(prefix, key, value.as_str());
+        }
 
-    //     let size = delta.get_size();
-    //     let block_data = BlockData::try_from(&delta).unwrap();
-    //     assert_eq!(size, block_data.get_size());
-    // }
+        let size = delta.get_size::<u32, &str>();
+        let block = block_manager.commit::<u32, &str>(&delta);
+        block_manager.flush(&block).await.unwrap();
+        let block = block_manager.get(&delta.id).await.unwrap();
+        assert_eq!(size, block.get_size());
+
+        // test save/load
+        test_save_load_size(path, &block);
+    }
 }

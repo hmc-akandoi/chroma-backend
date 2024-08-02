@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from typing import Optional, Sequence, Tuple
 from uuid import UUID
+from chromadb.api.configuration import CollectionConfigurationInternal
 from chromadb.types import (
     Collection,
     Database,
@@ -82,17 +83,18 @@ class SysDB(Component):
         self,
         id: UUID,
         name: str,
+        configuration: CollectionConfigurationInternal,
         metadata: Optional[Metadata] = None,
         dimension: Optional[int] = None,
         get_or_create: bool = False,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
     ) -> Tuple[Collection, bool]:
-        """Create a new collection any associated resources
+        """Create a new collection and associated resources
         in the SysDB. If get_or_create is True, the
         collection will be created if one with the same name does not exist.
         The metadata will be updated using the same protocol as update_collection. If get_or_create
-        is False and the collection already exists, a error will be raised.
+        is False and the collection already exists, an error will be raised.
 
         Returns a tuple of the created collection and a boolean indicating whether the
         collection was created or not.

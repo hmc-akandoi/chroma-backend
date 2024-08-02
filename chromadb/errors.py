@@ -1,9 +1,11 @@
 from abc import abstractmethod
-from typing import Dict, Type
+from typing import Dict, Optional, Type
 from overrides import overrides, EnforceOverrides
 
 
 class ChromaError(Exception, EnforceOverrides):
+    trace_id: Optional[str] = None
+
     def code(self) -> int:
         """Return an appropriate HTTP response code for this error"""
         return 400  # Bad Request
@@ -41,6 +43,21 @@ class IDAlreadyExistsError(ChromaError):
     @overrides
     def name(cls) -> str:
         return "IDAlreadyExists"
+
+
+class ChromaAuthError(ChromaError):
+    @overrides
+    def code(self) -> int:
+        return 403
+
+    @classmethod
+    @overrides
+    def name(cls) -> str:
+        return "AuthError"
+
+    @overrides
+    def message(self) -> str:
+        return "Forbidden"
 
 
 class DuplicateIDError(ChromaError):

@@ -15,14 +15,15 @@ func convertCollectionToModel(collectionAndMetadataList []*dbmodel.CollectionAnd
 	collections := make([]*model.Collection, 0, len(collectionAndMetadataList))
 	for _, collectionAndMetadata := range collectionAndMetadataList {
 		collection := &model.Collection{
-			ID:           types.MustParse(collectionAndMetadata.Collection.ID),
-			Name:         *collectionAndMetadata.Collection.Name,
-			Dimension:    collectionAndMetadata.Collection.Dimension,
-			TenantID:     collectionAndMetadata.TenantID,
-			DatabaseName: collectionAndMetadata.DatabaseName,
-			Ts:           collectionAndMetadata.Collection.Ts,
-			LogPosition:  collectionAndMetadata.Collection.LogPosition,
-			Version:      collectionAndMetadata.Collection.Version,
+			ID:                   types.MustParse(collectionAndMetadata.Collection.ID),
+			Name:                 *collectionAndMetadata.Collection.Name,
+			ConfigurationJsonStr: *collectionAndMetadata.Collection.ConfigurationJsonStr,
+			Dimension:            collectionAndMetadata.Collection.Dimension,
+			TenantID:             collectionAndMetadata.TenantID,
+			DatabaseName:         collectionAndMetadata.DatabaseName,
+			Ts:                   collectionAndMetadata.Collection.Ts,
+			LogPosition:          collectionAndMetadata.Collection.LogPosition,
+			Version:              collectionAndMetadata.Collection.Version,
 		}
 		collection.Metadata = convertCollectionMetadataToModel(collectionAndMetadata.CollectionMetadata)
 		collections = append(collections, collection)
@@ -40,6 +41,8 @@ func convertCollectionMetadataToModel(collectionMetadataList []*dbmodel.Collecti
 		for _, collectionMetadata := range collectionMetadataList {
 			if collectionMetadata.Key != nil {
 				switch {
+				case collectionMetadata.BoolValue != nil:
+					metadata.Add(*collectionMetadata.Key, &model.CollectionMetadataValueBoolType{Value: *collectionMetadata.BoolValue})
 				case collectionMetadata.StrValue != nil:
 					metadata.Add(*collectionMetadata.Key, &model.CollectionMetadataValueStringType{Value: *collectionMetadata.StrValue})
 				case collectionMetadata.IntValue != nil:
@@ -72,6 +75,8 @@ func convertCollectionMetadataToDB(collectionID string, metadata *model.Collecti
 			Key:          &keyCopy,
 		}
 		switch v := (value).(type) {
+		case *model.CollectionMetadataValueBoolType:
+			dbCollectionMetadata.BoolValue = &v.Value
 		case *model.CollectionMetadataValueStringType:
 			dbCollectionMetadata.StrValue = &v.Value
 		case *model.CollectionMetadataValueInt64Type:
@@ -120,6 +125,8 @@ func convertSegmentMetadataToModel(segmentMetadataList []*dbmodel.SegmentMetadat
 		for _, segmentMetadata := range segmentMetadataList {
 			if segmentMetadata.Key != nil {
 				switch {
+				case segmentMetadata.BoolValue != nil:
+					metadata.Set(*segmentMetadata.Key, &model.SegmentMetadataValueBoolType{Value: *segmentMetadata.BoolValue})
 				case segmentMetadata.StrValue != nil:
 					metadata.Set(*segmentMetadata.Key, &model.SegmentMetadataValueStringType{Value: *segmentMetadata.StrValue})
 				case segmentMetadata.IntValue != nil:
@@ -151,6 +158,8 @@ func convertSegmentMetadataToDB(segmentID string, metadata *model.SegmentMetadat
 			Key:       &keyCopy,
 		}
 		switch v := (value).(type) {
+		case *model.SegmentMetadataValueBoolType:
+			dbSegmentMetadata.BoolValue = &v.Value
 		case *model.SegmentMetadataValueStringType:
 			dbSegmentMetadata.StrValue = &v.Value
 		case *model.SegmentMetadataValueInt64Type:

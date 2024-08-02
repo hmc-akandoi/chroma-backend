@@ -68,7 +68,9 @@ class DistributedSegmentManager(SegmentManager):
         metadata_segment = _segment(
             SegmentType.BLOCKFILE_METADATA, SegmentScope.METADATA, collection
         )
-        record_segment = _segment(SegmentType.RECORD, SegmentScope.RECORD, collection)
+        record_segment = _segment(
+            SegmentType.BLOCKFILE_RECORD, SegmentScope.RECORD, collection
+        )
         return [vector_segment, record_segment, metadata_segment]
 
     @override
@@ -140,7 +142,7 @@ def _segment(type: SegmentType, scope: SegmentScope, collection: Collection) -> 
     # For the segment types with python implementations, we can propagate metadata
     if type in SEGMENT_TYPE_IMPLS:
         cls = get_class(SEGMENT_TYPE_IMPLS[type], SegmentImplementation)
-        collection_metadata = collection.get("metadata", None)
+        collection_metadata = collection.metadata
         if collection_metadata:
             metadata = cls.propagate_collection_metadata(collection_metadata)
 
@@ -148,6 +150,6 @@ def _segment(type: SegmentType, scope: SegmentScope, collection: Collection) -> 
         id=uuid4(),
         type=type.value,
         scope=scope,
-        collection=collection["id"],
+        collection=collection.id,
         metadata=metadata,
     )

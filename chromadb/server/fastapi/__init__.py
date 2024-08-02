@@ -1,19 +1,30 @@
-from typing import Any, Callable, cast, Dict, List, Sequence, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    cast,
+    Dict,
+    List,
+    Sequence,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+)
 import fastapi
 import orjson
-
 from anyio import (
     to_thread,
     CapacityLimiter,
 )
-from fastapi import FastAPI as _FastAPI, Response, Request
+from fastapi import FastAPI as _FastAPI, Response, Request, Body
 from fastapi.responses import JSONResponse, ORJSONResponse
-
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 from fastapi import HTTPException, status
 from uuid import UUID
-from chromadb.api.models.Collection import Collection
+
+from chromadb.api.configuration import CollectionConfigurationInternal
+from pydantic import BaseModel
 from chromadb.api.types import GetResult, QueryResult
 from chromadb.auth import (
     AuthzAction,
@@ -43,10 +54,10 @@ from chromadb.server.fastapi.types import (
     UpdateEmbedding,
 )
 from starlette.datastructures import Headers
-
 import logging
-
+from chromadb.telemetry.product.events import ServerStartEvent
 from chromadb.utils.fastapi import fastapi_json_response, string_to_uuid as _uuid
+from opentelemetry import trace
 from chromadb.telemetry.opentelemetry.fastapi import instrument_fastapi
 from chromadb.types import Database, Tenant
 from chromadb.telemetry.product import ServerContext, ProductTelemetryClient
@@ -55,6 +66,7 @@ from chromadb.telemetry.opentelemetry import (
     OpenTelemetryGranularity,
     trace_method,
 )
+from chromadb.types import Collection as CollectionModel
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +80,15 @@ def use_route_names_as_operation_ids(app: _FastAPI) -> None:
     for route in app.routes:
         if isinstance(route, APIRoute):
             route.operation_id = route.name
+
+
+async def add_trace_id_to_response_middleware(
+    request: Request, call_next: Callable[[Request], Any]
+) -> Response:
+    trace_id = trace.get_current_span().get_span_context().trace_id
+    response = await call_next(request)
+    response.headers["Chroma-Trace-Id"] = format(trace_id, "x")
+    return response
 
 
 async def catch_exceptions_middleware(
@@ -91,7 +112,18 @@ async def check_http_version_middleware(
     return await call_next(request)
 
 
-class ChromaAPIRouter(fastapi.APIRouter):
+D = TypeVar("D", bound=BaseModel, contravariant=True)
+
+
+def validate_model(model: Type[D], data: Any) -> D:  # type: ignore
+    """Used for backward compatibility with Pydantic 1.x"""
+    try:
+        return model.model_validate(data)  # pydantic 2.x
+    except AttributeError:
+        return model.parse_obj(data)  # pydantic 1.x
+
+
+class ChromaAPIRouter(fastapi.APIRouter):  # type: ignore
     # A simple subclass of fastapi's APIRouter which treats URLs with a
     # trailing "/" the same as URLs without. Docs will only contain URLs
     # without trailing "/"s.
@@ -121,7 +153,6 @@ class ChromaAPIRouter(fastapi.APIRouter):
 
 class FastAPI(Server):
     def __init__(self, settings: Settings):
-        super().__init__(settings)
         ProductTelemetryClient.SERVER_CONTEXT = ServerContext.FASTAPI
         # https://fastapi.tiangolo.com/advanced/custom-response/#use-orjsonresponse
         self._app = fastapi.FastAPI(debug=True, default_response_class=ORJSONResponse)
@@ -135,6 +166,7 @@ class FastAPI(Server):
 
         self._app.middleware("http")(check_http_version_middleware)
         self._app.middleware("http")(catch_exceptions_middleware)
+        self._app.middleware("http")(add_trace_id_to_response_middleware)
         self._app.add_middleware(
             CORSMiddleware,
             allow_headers=["*"],
@@ -279,6 +311,8 @@ class FastAPI(Server):
 
         use_route_names_as_operation_ids(self._app)
         instrument_fastapi(self._app)
+        telemetry_client = self._system.instance(ProductTelemetryClient)
+        telemetry_client.capture(ServerStartEvent())
 
     def shutdown(self) -> None:
         self._system.stop()
@@ -316,6 +350,10 @@ class FastAPI(Server):
     async def version(self) -> str:
         return self._api.get_version()
 
+    @trace_method(
+        "auth_and_get_tenant_and_database_for_request",
+        OpenTelemetryGranularity.OPERATION,
+    )
     def auth_and_get_tenant_and_database_for_request(
         self,
         headers: Headers,
@@ -341,7 +379,7 @@ class FastAPI(Server):
         if not self.authn_provider:
             return (tenant, database)
 
-        user_identity = self.authn_provider.authenticate_or_raise(headers)
+        user_identity = self.authn_provider.authenticate_or_raise(dict(headers))
 
         (
             new_tenant,
@@ -367,12 +405,15 @@ class FastAPI(Server):
 
     @trace_method("FastAPI.create_database", OpenTelemetryGranularity.OPERATION)
     async def create_database(
-        self, request: Request, tenant: str = DEFAULT_TENANT
+        self,
+        request: Request,
+        tenant: str = DEFAULT_TENANT,
+        body: CreateDatabase = Body(...),
     ) -> None:
         def process_create_database(
             tenant: str, headers: Headers, raw_body: bytes
         ) -> None:
-            db = CreateDatabase.model_validate(orjson.loads(raw_body))
+            db = validate_model(CreateDatabase, orjson.loads(raw_body))
 
             (
                 maybe_tenant,
@@ -432,9 +473,11 @@ class FastAPI(Server):
         )
 
     @trace_method("FastAPI.create_tenant", OpenTelemetryGranularity.OPERATION)
-    async def create_tenant(self, request: Request) -> None:
+    async def create_tenant(
+        self, request: Request, body: CreateTenant = Body(...)
+    ) -> None:
         def process_create_tenant(request: Request, raw_body: bytes) -> None:
-            tenant = CreateTenant.model_validate(orjson.loads(raw_body))
+            tenant = validate_model(CreateTenant, orjson.loads(raw_body))
 
             maybe_tenant, _ = self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
@@ -488,7 +531,7 @@ class FastAPI(Server):
         offset: Optional[int] = None,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Sequence[Collection]:
+    ) -> Sequence[CollectionModel]:
         (
             maybe_tenant,
             maybe_database,
@@ -504,8 +547,8 @@ class FastAPI(Server):
         if maybe_database:
             database = maybe_database
 
-        return cast(
-            Sequence[Collection],
+        api_collection_models = cast(
+            Sequence[CollectionModel],
             await to_thread.run_sync(
                 self._api.list_collections,
                 limit,
@@ -515,6 +558,8 @@ class FastAPI(Server):
                 limiter=self._capacity_limiter,
             ),
         )
+
+        return api_collection_models
 
     @trace_method("FastAPI.count_collections", OpenTelemetryGranularity.OPERATION)
     async def count_collections(
@@ -554,11 +599,17 @@ class FastAPI(Server):
         request: Request,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+        body: CreateCollection = Body(...),
+    ) -> CollectionModel:
         def process_create_collection(
             request: Request, tenant: str, database: str, raw_body: bytes
-        ) -> Collection:
-            create = CreateCollection.model_validate(orjson.loads(raw_body))
+        ) -> CollectionModel:
+            create = validate_model(CreateCollection, orjson.loads(raw_body))
+            configuration = (
+                CollectionConfigurationInternal()
+                if not create.configuration
+                else CollectionConfigurationInternal.from_json(create.configuration)
+            )
 
             (
                 maybe_tenant,
@@ -577,14 +628,15 @@ class FastAPI(Server):
 
             return self._api.create_collection(
                 name=create.name,
+                configuration=configuration,
                 metadata=create.metadata,
                 get_or_create=create.get_or_create,
                 tenant=tenant,
                 database=database,
             )
 
-        return cast(
-            Collection,
+        api_collection_model = cast(
+            CollectionModel,
             await to_thread.run_sync(
                 process_create_collection,
                 request,
@@ -594,6 +646,7 @@ class FastAPI(Server):
                 limiter=self._capacity_limiter,
             ),
         )
+        return api_collection_model
 
     @trace_method("FastAPI.get_collection", OpenTelemetryGranularity.OPERATION)
     async def get_collection(
@@ -602,7 +655,7 @@ class FastAPI(Server):
         collection_name: str,
         tenant: str = DEFAULT_TENANT,
         database: str = DEFAULT_DATABASE,
-    ) -> Collection:
+    ) -> CollectionModel:
         (
             maybe_tenant,
             maybe_database,
@@ -618,30 +671,27 @@ class FastAPI(Server):
         if maybe_database:
             database = maybe_database
 
-        return cast(
-            Collection,
+        api_collection_model = cast(
+            CollectionModel,
             await to_thread.run_sync(
                 self._api.get_collection,
                 collection_name,
-                None,
-                None,
-                None,
+                None,  # id
                 tenant,
                 database,
                 limiter=self._capacity_limiter,
             ),
         )
+        return api_collection_model
 
     @trace_method("FastAPI.update_collection", OpenTelemetryGranularity.OPERATION)
     async def update_collection(
-        self,
-        collection_id: str,
-        request: Request,
+        self, collection_id: str, request: Request, body: UpdateCollection = Body(...)
     ) -> None:
         def process_update_collection(
             request: Request, collection_id: str, raw_body: bytes
         ) -> None:
-            update = UpdateCollection.model_validate(orjson.loads(raw_body))
+            update = validate_model(UpdateCollection, orjson.loads(raw_body))
             self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
                 AuthzAction.UPDATE_COLLECTION,
@@ -695,11 +745,13 @@ class FastAPI(Server):
         )
 
     @trace_method("FastAPI.add", OpenTelemetryGranularity.OPERATION)
-    async def add(self, request: Request, collection_id: str) -> bool:
+    async def add(
+        self, request: Request, collection_id: str, body: AddEmbedding = Body(...)
+    ) -> bool:
         try:
 
             def process_add(request: Request, raw_body: bytes) -> bool:
-                add = AddEmbedding.model_validate(orjson.loads(raw_body))
+                add = validate_model(AddEmbedding, orjson.loads(raw_body))
                 self.auth_and_get_tenant_and_database_for_request(
                     request.headers,
                     AuthzAction.ADD,
@@ -729,9 +781,11 @@ class FastAPI(Server):
             raise HTTPException(status_code=500, detail=str(e))
 
     @trace_method("FastAPI.update", OpenTelemetryGranularity.OPERATION)
-    async def update(self, request: Request, collection_id: str) -> None:
+    async def update(
+        self, request: Request, collection_id: str, body: UpdateEmbedding = Body(...)
+    ) -> None:
         def process_update(request: Request, raw_body: bytes) -> bool:
-            update = UpdateEmbedding.model_validate(orjson.loads(raw_body))
+            update = validate_model(UpdateEmbedding, orjson.loads(raw_body))
 
             self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
@@ -758,9 +812,11 @@ class FastAPI(Server):
         )
 
     @trace_method("FastAPI.upsert", OpenTelemetryGranularity.OPERATION)
-    async def upsert(self, request: Request, collection_id: str) -> None:
+    async def upsert(
+        self, request: Request, collection_id: str, body: AddEmbedding = Body(...)
+    ) -> None:
         def process_upsert(request: Request, raw_body: bytes) -> bool:
-            upsert = AddEmbedding.model_validate(orjson.loads(raw_body))
+            upsert = validate_model(AddEmbedding, orjson.loads(raw_body))
 
             self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
@@ -787,9 +843,11 @@ class FastAPI(Server):
         )
 
     @trace_method("FastAPI.get", OpenTelemetryGranularity.OPERATION)
-    async def get(self, collection_id: str, request: Request) -> GetResult:
+    async def get(
+        self, collection_id: str, request: Request, body: GetEmbedding = Body(...)
+    ) -> GetResult:
         def process_get(request: Request, raw_body: bytes) -> GetResult:
-            get = GetEmbedding.model_validate(orjson.loads(raw_body))
+            get = validate_model(GetEmbedding, orjson.loads(raw_body))
             self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
                 AuthzAction.GET,
@@ -819,9 +877,11 @@ class FastAPI(Server):
         )
 
     @trace_method("FastAPI.delete", OpenTelemetryGranularity.OPERATION)
-    async def delete(self, collection_id: str, request: Request) -> List[UUID]:
+    async def delete(
+        self, collection_id: str, request: Request, body: DeleteEmbedding = Body(...)
+    ) -> List[UUID]:
         def process_delete(request: Request, raw_body: bytes) -> List[str]:
-            delete = DeleteEmbedding.model_validate(orjson.loads(raw_body))
+            delete = validate_model(DeleteEmbedding, orjson.loads(raw_body))
             self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
                 AuthzAction.DELETE,
@@ -895,9 +955,10 @@ class FastAPI(Server):
         self,
         collection_id: str,
         request: Request,
+        body: QueryEmbedding = Body(...),
     ) -> QueryResult:
         def process_query(request: Request, raw_body: bytes) -> QueryResult:
-            query = QueryEmbedding.model_validate(orjson.loads(raw_body))
+            query = validate_model(QueryEmbedding, orjson.loads(raw_body))
 
             self.auth_and_get_tenant_and_database_for_request(
                 request.headers,
@@ -930,7 +991,7 @@ class FastAPI(Server):
     async def pre_flight_checks(self) -> Dict[str, Any]:
         def process_pre_flight_checks() -> Dict[str, Any]:
             return {
-                "max_batch_size": self._api.max_batch_size,
+                "max_batch_size": self._api.get_max_batch_size(),
             }
 
         return cast(

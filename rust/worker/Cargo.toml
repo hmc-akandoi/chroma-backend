@@ -41,15 +41,22 @@ parking_lot = "0.12.1"
 aws-sdk-s3 = "1.5.0"
 aws-smithy-types = "1.1.0"
 aws-config = { version = "1.1.2", features = ["behavior-version-latest"] }
-arrow = "50.0.0"
+arrow = "52.0.0"
 roaring = "0.10.3"
 tantivy = "0.21.1"
 tracing = "0.1"
 tracing-bunyan-formatter = "0.3.3"
 tracing-opentelemetry = "0.19.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-opentelemetry = { version = "0.19.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry = { version = "0.19.0", default-features = false, features = [
+  "trace",
+  "rt-tokio",
+] }
 opentelemetry-otlp = "0.12.0"
+shuttle = "0.7.1"
+regex = "1.10.5"
+flatbuffers = "24.3.25"
+foyer = "0.8"
 
 [dev-dependencies]
 proptest = "1.4.0"
@@ -57,6 +64,9 @@ proptest-state-machine = "0.1.0"
 "rand" = "0.8.5"
 rayon = "1.8.0"
 criterion = "0.3"
+random-port = "0.1.1"
+serial_test = "3.1.1"
+rand_xorshift = "0.3.0"
 
 [build-dependencies]
 tonic-build = "0.10"

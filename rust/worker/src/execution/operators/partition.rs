@@ -60,8 +60,6 @@ impl ChromaError for PartitionError {
     }
 }
 
-pub type PartitionResult = Result<PartitionOutput, PartitionError>;
-
 impl PartitionOperator {
     pub fn new() -> Box<Self> {
         Box::new(PartitionOperator {})
@@ -126,7 +124,11 @@ impl PartitionOperator {
 impl Operator<PartitionInput, PartitionOutput> for PartitionOperator {
     type Error = PartitionError;
 
-    async fn run(&self, input: &PartitionInput) -> PartitionResult {
+    fn get_name(&self) -> &'static str {
+        "PartitionOperator"
+    }
+
+    async fn run(&self, input: &PartitionInput) -> Result<PartitionOutput, PartitionError> {
         let records = &input.records;
         let partition_size = self.determine_partition_size(records.len(), input.max_partition_size);
         let deduped_records = self.partition(records, partition_size);

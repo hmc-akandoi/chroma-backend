@@ -1,5 +1,7 @@
 use crate::execution::data::data_chunk::Chunk;
-use crate::types::{LogRecord, Operation};
+use crate::segment::record_segment::RecordSegmentReaderCreationError;
+use crate::segment::{LogMaterializer, LogMaterializerError, MaterializedLogRecord};
+use crate::types::{LogRecord, MaterializedLogOperation, Operation};
 use crate::{
     blockstore::provider::BlockfileProvider,
     errors::{ChromaError, ErrorCodes},
@@ -10,8 +12,10 @@ use crate::{
     types::Segment,
 };
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::{Instrument, Span};
 
 #[derive(Debug)]
 pub struct HnswKnnOperator {}
@@ -39,6 +43,10 @@ pub enum HnswKnnOperatorError {
     RecordSegmentError,
     #[error("Error reading Record Segment")]
     RecordSegmentReadError,
+    #[error("Invalid allowed and disallowed ids")]
+    InvalidAllowedAndDisallowedIds,
+    #[error("Error materializing logs {0}")]
+    LogMaterializationError(#[from] LogMaterializerError),
 }
 
 impl ChromaError for HnswKnnOperatorError {
@@ -46,27 +54,29 @@ impl ChromaError for HnswKnnOperatorError {
         match self {
             HnswKnnOperatorError::RecordSegmentError => ErrorCodes::Internal,
             HnswKnnOperatorError::RecordSegmentReadError => ErrorCodes::Internal,
+            HnswKnnOperatorError::InvalidAllowedAndDisallowedIds => ErrorCodes::InvalidArgument,
+            HnswKnnOperatorError::LogMaterializationError(e) => e.code(),
         }
     }
 }
 
-pub type HnswKnnOperatorResult = Result<HnswKnnOperatorOutput, Box<dyn ChromaError>>;
-
 impl HnswKnnOperator {
-    async fn get_disallowed_ids(
+    async fn get_disallowed_ids<'referred_data>(
         &self,
-        logs: Chunk<LogRecord>,
+        logs: Chunk<MaterializedLogRecord<'_>>,
         record_segment_reader: &RecordSegmentReader<'_>,
     ) -> Result<Vec<u32>, Box<dyn ChromaError>> {
         let mut disallowed_ids = Vec::new();
         for item in logs.iter() {
             let log = item.0;
-            let operation_record = &log.record;
-            if operation_record.operation == Operation::Delete
-                || operation_record.operation == Operation::Update
+            // This means that even if an embedding is not updated on the log,
+            // we brute force it. Can use the HNSW index also.
+            if log.final_operation == MaterializedLogOperation::DeleteExisting
+                || log.final_operation == MaterializedLogOperation::UpdateExisting
+                || log.final_operation == MaterializedLogOperation::OverwriteExisting
             {
                 let offset_id = record_segment_reader
-                    .get_offset_id_for_user_id(&operation_record.id)
+                    .get_offset_id_for_user_id(log.merged_user_id_ref())
                     .await;
                 match offset_id {
                     Ok(offset_id) => disallowed_ids.push(offset_id),
@@ -78,13 +88,36 @@ impl HnswKnnOperator {
         }
         Ok(disallowed_ids)
     }
+
+    // Validate that the allowed ids are not in the disallowed ids
+    fn validate_allowed_and_disallowed_ids(
+        &self,
+        allowed_ids: &[u32],
+        disallowed_ids: &[u32],
+    ) -> Result<(), Box<dyn ChromaError>> {
+        for allowed_id in allowed_ids {
+            if disallowed_ids.contains(allowed_id) {
+                return Err(Box::new(
+                    HnswKnnOperatorError::InvalidAllowedAndDisallowedIds,
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Operator<HnswKnnOperatorInput, HnswKnnOperatorOutput> for HnswKnnOperator {
     type Error = Box<dyn ChromaError>;
 
-    async fn run(&self, input: &HnswKnnOperatorInput) -> HnswKnnOperatorResult {
+    fn get_name(&self) -> &'static str {
+        "HnswKnnOperator"
+    }
+
+    async fn run(
+        &self,
+        input: &HnswKnnOperatorInput,
+    ) -> Result<HnswKnnOperatorOutput, Self::Error> {
         let record_segment_reader = match RecordSegmentReader::from_segment(
             &input.record_segment,
             &input.blockfile_provider,
@@ -92,34 +125,109 @@ impl Operator<HnswKnnOperatorInput, HnswKnnOperatorOutput> for HnswKnnOperator {
         .await
         {
             Ok(reader) => reader,
+            Err(e) => match *e {
+                RecordSegmentReaderCreationError::UninitializedSegment => {
+                    tracing::error!(
+                        "[HnswKnnOperation]: Error creating record segment reader {:?}",
+                        *e
+                    );
+                    return Ok(HnswKnnOperatorOutput {
+                        offset_ids: vec![],
+                        distances: vec![],
+                    });
+                }
+                _ => {
+                    tracing::error!("[HnswKnnOperation]: Error creating record segment {:?}", e);
+                    return Err(Box::new(HnswKnnOperatorError::RecordSegmentError));
+                }
+            },
+        };
+        let log_materializer = LogMaterializer::new(
+            Some(record_segment_reader.clone()),
+            input.logs.clone(),
+            None,
+        );
+        let logs = match log_materializer
+            .materialize()
+            .instrument(tracing::trace_span!(parent: Span::current(), "Materialize logs"))
+            .await
+        {
+            Ok(logs) => logs,
             Err(e) => {
-                return Err(Box::new(HnswKnnOperatorError::RecordSegmentError));
+                tracing::error!("[HnswKnnOperation]: Error materializing logs {:?}", e);
+                return Err(Box::new(HnswKnnOperatorError::LogMaterializationError(e)));
             }
         };
+        let mut remaining_allowed_ids: HashSet<&String> =
+            HashSet::from_iter(input.allowed_ids.iter());
+        for (log, _) in logs.iter() {
+            remaining_allowed_ids.remove(&log.merged_user_id_ref().to_string());
+        }
+        // If a filter list is supplied but it does not have anything for the segment, as it implies the data is all in the log
+        // then return an empty response.
+        if !input.allowed_ids.is_empty() && remaining_allowed_ids.is_empty() {
+            return Ok(HnswKnnOperatorOutput {
+                offset_ids: vec![],
+                distances: vec![],
+            });
+        }
         let mut allowed_offset_ids = Vec::new();
-        for user_id in input.allowed_ids.iter() {
+        for user_id in remaining_allowed_ids {
             let offset_id = record_segment_reader
                 .get_offset_id_for_user_id(user_id)
                 .await;
             match offset_id {
                 Ok(offset_id) => allowed_offset_ids.push(offset_id),
                 Err(e) => {
+                    tracing::error!(
+                        "[HnswKnnOperation]: Record segment read error for allowed ids {:?}",
+                        e
+                    );
                     return Err(Box::new(HnswKnnOperatorError::RecordSegmentReadError));
                 }
             }
         }
-        let disallowed_offset_ids = match self
-            .get_disallowed_ids(input.logs.clone(), &record_segment_reader)
-            .await
+        tracing::info!(
+            "[HnswKnnOperation]: Allowed {} offset ids",
+            allowed_offset_ids.len()
+        );
+        let disallowed_offset_ids =
+            match self.get_disallowed_ids(logs, &record_segment_reader).await {
+                Ok(disallowed_offset_ids) => disallowed_offset_ids,
+                Err(e) => {
+                    tracing::error!("[HnswKnnOperation]: Error fetching disallowed ids {:?}", e);
+                    return Err(Box::new(HnswKnnOperatorError::RecordSegmentReadError));
+                }
+            };
+        tracing::info!(
+            "[HnswKnnOperation]: Disallowed {} offset ids",
+            disallowed_offset_ids.len()
+        );
+
+        match self.validate_allowed_and_disallowed_ids(&allowed_offset_ids, &disallowed_offset_ids)
         {
-            Ok(disallowed_offset_ids) => disallowed_offset_ids,
+            Ok(_) => {}
             Err(e) => {
-                return Err(Box::new(HnswKnnOperatorError::RecordSegmentReadError));
+                tracing::error!(
+                    "[HnswKnnOperation]: Error validating allowed and disallowed ids {:?}",
+                    e
+                );
+                return Err(e);
             }
         };
 
-        // TODO: pass in the updated + deleted ids from log and the result from the metadata filtering
-        let (offset_ids, distances) = input.segment.query(&input.query, input.k);
+        // Convert to usize
+        let allowed_offset_ids: Vec<usize> =
+            allowed_offset_ids.iter().map(|&x| x as usize).collect();
+        let disallowed_offset_ids: Vec<usize> =
+            disallowed_offset_ids.iter().map(|&x| x as usize).collect();
+
+        let (offset_ids, distances) = input.segment.query(
+            &input.query,
+            input.k,
+            &allowed_offset_ids,
+            &disallowed_offset_ids,
+        );
         Ok(HnswKnnOperatorOutput {
             offset_ids,
             distances,

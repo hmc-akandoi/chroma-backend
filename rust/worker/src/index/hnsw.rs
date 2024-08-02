@@ -6,7 +6,13 @@ use crate::errors::{ChromaError, ErrorCodes};
 use super::{Index, IndexConfig, PersistentIndex};
 use crate::types::{Metadata, MetadataValue, MetadataValueConversionError, Segment};
 use thiserror::Error;
+use tracing::instrument;
 use uuid::Uuid;
+
+const DEFAULT_MAX_ELEMENTS: usize = 10000;
+const DEFAULT_HNSW_M: usize = 16;
+const DEFAULT_HNSW_EF_CONSTRUCTION: usize = 100;
+const DEFAULT_HNSW_EF_SEARCH: usize = 10;
 
 // https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
 #[repr(C)]
@@ -19,7 +25,7 @@ struct IndexPtrFFI {
 // - Watchable - for dynamic updates
 // - Have a notion of static vs dynamic config
 // - Have a notion of default config
-// - HNSWIndex should store a ref to the config so it can look up the config values.
+// - TODO: HNSWIndex should store a ref to the config so it can look up the config values.
 //   deferring this for a config pass
 #[derive(Clone, Debug)]
 pub(crate) struct HnswIndexConfig {
@@ -64,16 +70,13 @@ impl HnswIndexConfig {
                 // TODO: This should error, but the configuration is not stored correctly
                 // after the configuration is refactored to be always stored and doesn't rely on defaults we can fix this
                 return Ok(HnswIndexConfig {
-                    max_elements: 1000,
-                    m: 16,
-                    ef_construction: 100,
-                    ef_search: 10,
+                    max_elements: DEFAULT_MAX_ELEMENTS,
+                    m: DEFAULT_HNSW_M,
+                    ef_construction: DEFAULT_HNSW_EF_CONSTRUCTION,
+                    ef_search: DEFAULT_HNSW_EF_SEARCH,
                     random_seed: 0,
                     persist_path: persist_path.to_string(),
                 });
-                // return Err(Box::new(HnswIndexFromSegmentError::MissingConfig(
-                //     "metadata".to_string(),
-                // )))
             }
         };
 
@@ -98,12 +101,13 @@ impl HnswIndexConfig {
             }
         }
 
-        let max_elements = get_metadata_value_as::<i32>(metadata, "hsnw:max_elements")?;
-        let m = get_metadata_value_as::<i32>(metadata, "hnsw:m")?;
-        let ef_construction = get_metadata_value_as::<i32>(metadata, "hnsw:ef_construction")?;
-        let ef_search = get_metadata_value_as::<i32>(metadata, "hnsw:ef_search")?;
+        let m = get_metadata_value_as::<i32>(metadata, "hnsw:M").unwrap_or(DEFAULT_HNSW_M as i32);
+        let ef_construction = get_metadata_value_as::<i32>(metadata, "hnsw:construction_ef")
+            .unwrap_or(DEFAULT_HNSW_EF_CONSTRUCTION as i32);
+        let ef_search = get_metadata_value_as::<i32>(metadata, "hnsw:search_ef")
+            .unwrap_or(DEFAULT_HNSW_EF_SEARCH as i32);
         return Ok(HnswIndexConfig {
-            max_elements: max_elements as usize,
+            max_elements: DEFAULT_MAX_ELEMENTS,
             m: m as usize,
             ef_construction: ef_construction as usize,
             ef_search: ef_search as usize,
@@ -201,25 +205,40 @@ impl Index<HnswIndexConfig> for HnswIndex {
     }
 
     fn add(&self, id: usize, vector: &[f32]) {
-        unsafe { add_item(self.ffi_ptr, vector.as_ptr(), id, false) }
+        unsafe { add_item(self.ffi_ptr, vector.as_ptr(), id, true) }
     }
 
     fn delete(&self, id: usize) {
         unsafe { mark_deleted(self.ffi_ptr, id) }
     }
 
-    fn query(&self, vector: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
+    fn query(
+        &self,
+        vector: &[f32],
+        k: usize,
+        allowed_ids: &[usize],
+        disallowed_ids: &[usize],
+    ) -> (Vec<usize>, Vec<f32>) {
         let actual_k = std::cmp::min(k, self.len());
         let mut ids = vec![0usize; actual_k];
         let mut distance = vec![0.0f32; actual_k];
+        let mut total_result = actual_k;
         unsafe {
-            knn_query(
+            total_result = knn_query(
                 self.ffi_ptr,
                 vector.as_ptr(),
                 k,
                 ids.as_mut_ptr(),
                 distance.as_mut_ptr(),
-            );
+                allowed_ids.as_ptr(),
+                allowed_ids.len(),
+                disallowed_ids.as_ptr(),
+                disallowed_ids.len(),
+            ) as usize;
+        }
+        if total_result < actual_k {
+            ids.truncate(total_result);
+            distance.truncate(total_result);
         }
         return (ids, distance);
     }
@@ -239,6 +258,7 @@ impl PersistentIndex<HnswIndexConfig> for HnswIndex {
         Ok(())
     }
 
+    #[instrument(name = "HnswIndex load", level = "info")]
     fn load(
         path: &str,
         index_config: &IndexConfig,
@@ -282,6 +302,14 @@ impl HnswIndex {
     pub fn len(&self) -> usize {
         unsafe { len(self.ffi_ptr) as usize }
     }
+
+    pub fn capacity(&self) -> usize {
+        unsafe { capacity(self.ffi_ptr) as usize }
+    }
+
+    pub fn resize(&mut self, new_size: usize) {
+        unsafe { resize_index(self.ffi_ptr, new_size) }
+    }
 }
 
 #[link(name = "bindings", kind = "static")]
@@ -317,16 +345,23 @@ extern "C" {
         k: usize,
         ids: *mut usize,
         distance: *mut f32,
-    );
+        allowed_ids: *const usize,
+        allowed_ids_length: usize,
+        disallowed_ids: *const usize,
+        disallowed_ids_length: usize,
+    ) -> c_int;
 
     fn get_ef(index: *const IndexPtrFFI) -> c_int;
     fn set_ef(index: *const IndexPtrFFI, ef: c_int);
     fn len(index: *const IndexPtrFFI) -> c_int;
-
+    fn capacity(index: *const IndexPtrFFI) -> c_int;
+    fn resize_index(index: *const IndexPtrFFI, new_size: usize);
 }
 
 #[cfg(test)]
 pub mod test {
+    use std::collections::HashMap;
+
     use super::*;
 
     use crate::distance::DistanceFunction;
@@ -499,7 +534,9 @@ pub mod test {
 
         // Query the data
         let query = &data[0..d];
-        let (ids, distances) = index.query(query, 1);
+        let allow_ids = &[];
+        let disallow_ids = &[];
+        let (ids, distances) = index.query(query, 1, allow_ids, disallow_ids);
         assert_eq!(ids.len(), 1);
         assert_eq!(distances.len(), 1);
         assert_eq!(ids[0], 0);
@@ -543,6 +580,8 @@ pub mod test {
             index.add(ids[i], data);
         });
 
+        assert_eq!(index.len(), n);
+
         // Delete some of the data
         let mut rng = rand::thread_rng();
         let delete_ids: Vec<usize> = (0..n).choose_multiple(&mut rng, n / 20);
@@ -551,10 +590,14 @@ pub mod test {
             index.delete(*id);
         }
 
+        assert_eq!(index.len(), n - delete_ids.len());
+
+        let allow_ids = &[];
+        let disallow_ids = &[];
         // Query for the deleted ids and ensure they are not found
         for deleted_id in &delete_ids {
             let target_vector = &data[*deleted_id * d..(*deleted_id + 1) * d];
-            let (ids, _) = index.query(target_vector, 10);
+            let (ids, _) = index.query(target_vector, 10, allow_ids, disallow_ids);
             for check_deleted_id in &delete_ids {
                 assert!(!ids.contains(check_deleted_id));
             }
@@ -625,7 +668,9 @@ pub mod test {
 
         // Query the data
         let query = &data[0..d];
-        let (ids, distances) = index.query(query, 1);
+        let allow_ids = &[];
+        let disallow_ids = &[];
+        let (ids, distances) = index.query(query, 1, allow_ids, disallow_ids);
         assert_eq!(ids.len(), 1);
         assert_eq!(distances.len(), 1);
         assert_eq!(ids[0], 0);
@@ -646,5 +691,146 @@ pub mod test {
             }
             i += 1;
         }
+    }
+
+    #[test]
+    fn it_can_add_and_query_with_allowed_and_disallowed_ids() {
+        let n = 1000;
+        let d: usize = 960;
+        let distance_function = DistanceFunction::Euclidean;
+        let tmp_dir = tempdir().unwrap();
+        let persist_path = tmp_dir.path().to_str().unwrap().to_string();
+        let index = HnswIndex::init(
+            &IndexConfig {
+                dimensionality: d as i32,
+                distance_function: distance_function,
+            },
+            Some(&HnswIndexConfig {
+                max_elements: n,
+                m: 16,
+                ef_construction: 100,
+                ef_search: 100,
+                random_seed: 0,
+                persist_path: persist_path,
+            }),
+            Uuid::new_v4(),
+        );
+
+        let index = match index {
+            Err(e) => panic!("Error initializing index: {}", e),
+            Ok(index) => index,
+        };
+
+        let data: Vec<f32> = utils::generate_random_data(n, d);
+        let ids: Vec<usize> = (0..n).collect();
+
+        (0..n).into_iter().for_each(|i| {
+            let data = &data[i * d..(i + 1) * d];
+            index.add(ids[i], data);
+        });
+
+        // Query the data
+        let query = &data[0..d];
+        let allow_ids = &[0, 2];
+        let disallow_ids = &[3];
+        let (ids, distances) = index.query(query, 10, allow_ids, disallow_ids);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(distances.len(), 2);
+    }
+
+    #[test]
+    fn it_can_resize() {
+        let n = 1000;
+        let d: usize = 960;
+        let distance_function = DistanceFunction::Euclidean;
+        let tmp_dir = tempdir().unwrap();
+        let persist_path = tmp_dir.path().to_str().unwrap().to_string();
+        let index = HnswIndex::init(
+            &IndexConfig {
+                dimensionality: d as i32,
+                distance_function: distance_function,
+            },
+            Some(&HnswIndexConfig {
+                max_elements: n,
+                m: 16,
+                ef_construction: 100,
+                ef_search: 100,
+                random_seed: 0,
+                persist_path: persist_path,
+            }),
+            Uuid::new_v4(),
+        );
+
+        let mut index = match index {
+            Err(e) => panic!("Error initializing index: {}", e),
+            Ok(index) => index,
+        };
+
+        let data: Vec<f32> = utils::generate_random_data(2 * n, d);
+        let ids: Vec<usize> = (0..2 * n).collect();
+
+        (0..n).into_iter().for_each(|i| {
+            let data = &data[i * d..(i + 1) * d];
+            index.add(ids[i], data);
+        });
+        assert_eq!(index.capacity(), n);
+
+        // Resize the index to 2*n
+        index.resize(2 * n);
+
+        assert_eq!(index.len(), n);
+        assert_eq!(index.capacity(), 2 * n);
+
+        // Add another n elements from n to 2n
+        (n..2 * n).into_iter().for_each(|i| {
+            let data = &data[i * d..(i + 1) * d];
+            index.add(ids[i], data);
+        });
+    }
+
+    #[test]
+    fn parameter_defaults() {
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            r#type: crate::types::SegmentType::HnswDistributed,
+            scope: crate::types::SegmentScope::VECTOR,
+            metadata: Some(HashMap::new()),
+            collection: Some(Uuid::new_v4()),
+            file_path: HashMap::new(),
+        };
+
+        let persist_path = tempdir().unwrap().path().to_owned();
+        let config = HnswIndexConfig::from_segment(&segment, &persist_path)
+            .expect("Failed to create config from segment");
+
+        assert_eq!(config.max_elements, DEFAULT_MAX_ELEMENTS);
+        assert_eq!(config.m, DEFAULT_HNSW_M);
+        assert_eq!(config.ef_construction, DEFAULT_HNSW_EF_CONSTRUCTION);
+        assert_eq!(config.ef_search, DEFAULT_HNSW_EF_SEARCH);
+        assert_eq!(config.random_seed, 0);
+        assert_eq!(config.persist_path, persist_path.to_str().unwrap());
+
+        // Try partial metadata
+        let mut metadata = HashMap::new();
+        metadata.insert("hnsw:M".to_string(), MetadataValue::Int(10 as i32));
+
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            r#type: crate::types::SegmentType::HnswDistributed,
+            scope: crate::types::SegmentScope::VECTOR,
+            metadata: Some(metadata),
+            collection: Some(Uuid::new_v4()),
+            file_path: HashMap::new(),
+        };
+
+        let config = HnswIndexConfig::from_segment(&segment, &persist_path)
+            .expect("Failed to create config from segment");
+
+        assert_eq!(config.max_elements, DEFAULT_MAX_ELEMENTS);
+        assert_eq!(config.m, 10);
+        assert_eq!(config.ef_construction, DEFAULT_HNSW_EF_CONSTRUCTION);
+        assert_eq!(config.ef_search, DEFAULT_HNSW_EF_SEARCH);
+        assert_eq!(config.random_seed, 0);
+        assert_eq!(config.persist_path, persist_path.to_str().unwrap());
     }
 }

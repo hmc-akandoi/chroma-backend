@@ -9,6 +9,8 @@ export const items = [
         { href: '/integrations/hugging-face', children: 'Hugging Face' },
         { href: '/integrations/instructor', children: 'Instructor' },
         { href: '/integrations/jinaai', children: 'JinaAI' },
+        { href: '/integrations/roboflow', children: 'Roboflow' },
+        { href: '/integrations/ollama', children: 'Ollama Embeddings' },
       ]
     },
     {
@@ -20,6 +22,7 @@ export const items = [
         { href: '/integrations/haystack', children: 'Haystack' },
         { href: '/integrations/openllmetry', children: 'OpenLLMetry' },
         { href: '/integrations/streamlit', children: 'Streamlit' },
+          { href: '/integrations/openlit', children: 'OpenLIT' },
       ]
     },
   ];

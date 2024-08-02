@@ -36,7 +36,7 @@ class LocalHnswSegment(VectorReader):
     _id: UUID
     _consumer: Consumer
     _collection: Optional[UUID]
-    _subscription: UUID
+    _subscription: Optional[UUID]
     _settings: Settings
     _params: HnswParams
 
@@ -60,6 +60,7 @@ class LocalHnswSegment(VectorReader):
         self._consumer = system.instance(Consumer)
         self._id = segment["id"]
         self._collection = segment["collection"]
+        self._subscription = None
         self._settings = system.settings
         self._params = HnswParams(segment["metadata"] or {})
 
@@ -74,7 +75,6 @@ class LocalHnswSegment(VectorReader):
 
         self._lock = ReadWriteLock()
         self._opentelemtry_client = system.require(OpenTelemetryClient)
-        super().__init__(system, segment)
 
     @staticmethod
     @override
@@ -292,8 +292,8 @@ class LocalHnswSegment(VectorReader):
 
             for record in records:
                 self._max_seq_id = max(self._max_seq_id, record["log_offset"])
-                id = record["operation_record"]["id"]
-                op = record["operation_record"]["operation"]
+                id = record["record"]["id"]
+                op = record["record"]["operation"]
                 label = self._id_to_label.get(id, None)
 
                 if op == Operation.DELETE:
@@ -303,12 +303,12 @@ class LocalHnswSegment(VectorReader):
                         logger.warning(f"Delete of nonexisting embedding ID: {id}")
 
                 elif op == Operation.UPDATE:
-                    if record["operation_record"]["embedding"] is not None:
+                    if record["record"]["embedding"] is not None:
                         if label is not None:
                             batch.apply(record)
                         else:
                             logger.warning(
-                                f"Update of nonexisting embedding ID: {record['operation_record']['id']}"
+                                f"Update of nonexisting embedding ID: {record['record']['id']}"
                             )
                 elif op == Operation.ADD:
                     if not label:
